@@ -1,0 +1,46 @@
+name: Release & Quality Gate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  release:
+    types: [published]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-node: '18'
+
+      - name: Syntax Check Userscript
+        run: |
+          node --check NullTrail.user.js
+          echo "✓ Userscript syntax is perfectly valid!"
+
+      - name: Verify Userscript Metadata Headers
+        run: |
+          if ! grep -q "@name" NullTrail.user.js; then
+            echo "Error: Missing @name in metadata header"
+            exit 1
+          fi
+          if ! grep -q "@version" NullTrail.user.js; then
+            echo "Error: Missing @version in metadata header"
+            exit 1
+          fi
+          if ! grep -q "@updateURL" NullTrail.user.js; then
+            echo "Warning: Missing @updateURL in metadata header"
+          fi
+          if ! grep -q "@downloadURL" NullTrail.user.js; then
+            echo "Warning: Missing @downloadURL in metadata header"
+          fi
+          echo "✓ Metadata headers verified!"
