@@ -1680,7 +1680,7 @@
         n: "duckduckgo",
         h: /(^|\.)duckduckgo\.com$/i,
         u: unwrapDDG,
-        s: [ "kp", "kl", "k1", "kaf", "khq", "kns", "kac", "km", "kam", "rut", "df", "ia", "iar", "iai", "iaf" ]
+        s: [ "kp", "kl", "k1", "kaf", "khq", "kns", "kac", "km", "kam", "rut", "df", "iar", "iaf" ]
     }, {
         n: "yandex",
         h: /(^|\.)yandex\.[a-z]{2,}$/i,
