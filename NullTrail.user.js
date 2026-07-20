@@ -1826,7 +1826,7 @@
         n: "walla",
         h: /(^|\.)search\.walla\.co\.il$/i,
         s: [ "e", "q", "l" ]
-    } ]
+    } ];
 
     const _engineCache = {};
     function getEngine(host) {
@@ -2536,6 +2536,7 @@
         }
 
         // Anchor overrides
+        // Critical Compatibility Mitigation: Return original hrefs to page scripts to prevent breaking on-page handlers (e.g. DuckDuckGo image transitions)
         try {
             const proto = HTMLAnchorElement.prototype;
             const hp = Object.getOwnPropertyDescriptor(proto, "href");
@@ -2545,27 +2546,52 @@
                 Object.defineProperty(proto, "href", {
                     configurable: true,
                     enumerable: true,
-                    get: function() { return hget(this); },
+                    get: function() {
+                        const origAttr = this.getAttribute("data-nt-orig-href");
+                        if (origAttr) return origAttr;
+                        if (this._nt_orig) return this._nt_orig;
+                        return hget(this);
+                    },
                     set: function(v) {
-                        hset(this, v);
+                        this._nt_orig = String(v);
+                        let target = v;
                         try {
                             const r = realLink(this);
-                            if (r) hset(this, r);
+                            if (r) target = r;
                         } catch (e) {}
+                        hset(this, target);
                         updateRP(this);
                     }
                 });
             }
-            const setAttr = Function.prototype.call.bind(proto.setAttribute);
-            Object.defineProperty(proto, "setAttribute", {
-                configurable: true,
-                enumerable: false,
-                writable: true,
-                value: function(name, val) {
-                    if (String(name).toLowerCase() === "href") this.href = val; 
-                    else setAttr(this, name, val);
+            
+            // Override getAttribute and setAttribute to fully proxy the original href values to page scripts
+            const origGetAttr = Element.prototype.getAttribute;
+            Element.prototype.getAttribute = function(name) {
+                const ln = String(name).toLowerCase();
+                if (ln === "href" && this.tagName === "A") {
+                    const origAttr = origGetAttr.call(this, "data-nt-orig-href");
+                    if (origAttr) return origAttr;
+                    if (this._nt_orig_attr) return this._nt_orig_attr;
+                    if (this._nt_orig) return this._nt_orig;
                 }
-            });
+                return origGetAttr.apply(this, arguments);
+            };
+
+            const origSetAttr = Element.prototype.setAttribute;
+            Element.prototype.setAttribute = function(name, val) {
+                const ln = String(name).toLowerCase();
+                if (ln === "href" && this.tagName === "A") {
+                    this._nt_orig_attr = String(val);
+                    if (this.href !== undefined) {
+                        this.href = val;
+                    } else {
+                        origSetAttr.call(this, "href", val);
+                    }
+                } else {
+                    origSetAttr.apply(this, arguments);
+                }
+            };
         } catch (e) {}
 
         const noop = () => true;
@@ -3054,7 +3080,11 @@
             const cleaned = sanitizeHref(orig);
             const didChange = cleaned && cleaned !== orig;
             if (didChange) {
-                try { el.href = cleaned; } catch (e) {}
+                try { 
+                    // Critical Compatibility Mitigation: Store original href in data-nt-orig-href so website JS still sees what it expects
+                    el.setAttribute("data-nt-orig-href", orig);
+                    el.href = cleaned; 
+                } catch (e) {}
             }
             applyRP(el);
             if (CFG.relNoReferrer && el.target === "_blank") {
@@ -3110,6 +3140,8 @@
         } catch (e) {}
     }
 
+    // Critical Compatibility Mitigation: Do not rewrite the href elements of search result items
+    // dynamically on DuckDuckGo if they are accessed by DDG's image searches
     function scanSpecial() {
         const h = location.hostname, qs = location.search;
         let i, el, els, m;
@@ -3642,6 +3674,7 @@
             content.appendChild(row2);
         }
 
+        // Stats renderer
         function renderStats() {
             const eng = getEngine(location.hostname);
             const rows = [ 
