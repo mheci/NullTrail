@@ -12,6 +12,7 @@
 // @grant        GM_deleteValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // @connect      rules1.clearurls.xyz
 // @connect      rules2.clearurls.xyz
 // @match        *://*.bing.com/*
@@ -2400,8 +2401,19 @@
         }
     }
 
-    function ntMainWorldBoot() {
+        function ntMainWorldBoot(win) {
         "use strict";
+        win = win || window;
+        const doc = win.document;
+        const nav = win.navigator;
+        const ElementProto = win.Element.prototype;
+        const HTMLAnchorElementProto = win.HTMLAnchorElement.prototype;
+        const HTMLImageElementProto = win.HTMLImageElement.prototype;
+        const XMLHttpRequestProto = win.XMLHttpRequest.prototype;
+        const WebSocketRef = win.WebSocket;
+        const EventSourceRef = win.EventSource;
+        const NavigatorProto = win.Navigator.prototype;
+
         let cfg = {
             forceNoReferrer: true,
             referrerPolicy: "origin",
@@ -2418,7 +2430,7 @@
 
         function loadCfg() {
             try {
-                const m = document.getElementById("nt-config");
+                const m = doc.getElementById("nt-config");
                 if (m) {
                     const raw = m.getAttribute("content");
                     if (raw && raw !== _rawCfg) {
@@ -2431,7 +2443,7 @@
         }
         loadCfg();
 
-        document.addEventListener("nt:cfg", function() {
+        doc.addEventListener("nt:cfg", function() {
             _rawCfg = null;
             loadCfg();
         }, true);
@@ -2447,7 +2459,7 @@
         }
 
         function safeAtob(s) {
-            try { return atob(s); } catch (e) { return null; }
+            try { return win.atob(s); } catch (e) { return null; }
         }
 
         function safeDec(s) {
@@ -2457,7 +2469,7 @@
         function realGoogle(a) {
             if (a.protocol !== "https:" && a.protocol !== "http:") return null;
             let url;
-            if ((isG(a.hostname) || a.hostname === location.hostname) && (a.pathname === "/url" || a.pathname === "/local_url" || a.pathname === "/searchurl/rr.html" || a.pathname === "/linkredirect" || a.pathname === "/interstitial")) {
+            if ((isG(a.hostname) || a.hostname === win.location.hostname) && (a.pathname === "/url" || a.pathname === "/local_url" || a.pathname === "/searchurl/rr.html" || a.pathname === "/linkredirect" || a.pathname === "/interstitial")) {
                 if (url = /[?&](?:q|url|dest|imgurl|continue)=((?:https?|ftp)[%:][^&]+)/.exec(a.search)) return decodeURIComponent(url[1]);
                 if (url = /[?&](?:q|url|dest|continue)=((?:%2[Ff]|\/)[^&]+)/.exec(a.search)) return a.origin + decodeURIComponent(url[1]);
                 if (url = /[#&]url=(https?[:%][^&]+)/.exec(a.hash)) return decodeURIComponent(url[1]);
@@ -2510,7 +2522,7 @@
         function isGoodLinkMW(link) {
             if (typeof link !== "string" || !link) return false;
             try {
-                const u = new URL(link.trim(), location.href);
+                const u = new URL(link.trim(), win.location.href);
                 const h = u.hostname.toLowerCase();
                 if (h === "localhost" || h === "[::1]" || h === "::1") return false;
                 if (/^(?:127\.|10\.|192\.168\.|169\.254\.|0\.)/.test(h)) return false;
@@ -2538,12 +2550,11 @@
         // Anchor overrides
         // Critical Compatibility Mitigation: Return original hrefs to page scripts to prevent breaking on-page handlers (e.g. DuckDuckGo image transitions)
         try {
-            const proto = HTMLAnchorElement.prototype;
-            const hp = Object.getOwnPropertyDescriptor(proto, "href");
+            const hp = Object.getOwnPropertyDescriptor(HTMLAnchorElementProto, "href");
             if (hp && hp.get && hp.set) {
                 const hget = Function.prototype.call.bind(hp.get);
                 const hset = Function.prototype.call.bind(hp.set);
-                Object.defineProperty(proto, "href", {
+                Object.defineProperty(HTMLAnchorElementProto, "href", {
                     configurable: true,
                     enumerable: true,
                     get: function() {
@@ -2566,8 +2577,8 @@
             }
             
             // Override getAttribute and setAttribute to fully proxy the original href values to page scripts
-            const origGetAttr = Element.prototype.getAttribute;
-            Element.prototype.getAttribute = function(name) {
+            const origGetAttr = ElementProto.getAttribute;
+            ElementProto.getAttribute = function(name) {
                 const ln = String(name).toLowerCase();
                 if (ln === "href" && this.tagName === "A") {
                     const origAttr = origGetAttr.call(this, "data-nt-orig-href");
@@ -2578,8 +2589,8 @@
                 return origGetAttr.apply(this, arguments);
             };
 
-            const origSetAttr = Element.prototype.setAttribute;
-            Element.prototype.setAttribute = function(name, val) {
+            const origSetAttr = ElementProto.setAttribute;
+            ElementProto.setAttribute = function(name, val) {
                 const ln = String(name).toLowerCase();
                 if (ln === "href" && this.tagName === "A") {
                     this._nt_orig_attr = String(val);
@@ -2610,20 +2621,20 @@
             });
         }
 
-        killRwt(window);
-        if (window.google) killRwt(window.google);
+        killRwt(win);
+        if (win.google) killRwt(win.google);
         let gi = 0;
-        const gt = setInterval(function() {
-            if (window.google) killRwt(window.google);
-            if (++gi > 30) clearInterval(gt);
+        const gt = win.setInterval(function() {
+            if (win.google) killRwt(win.google);
+            if (++gi > 30) win.clearInterval(gt);
         }, 250);
 
         let _navigatedMW = false;
         function navigateMW(target) {
             if (_navigatedMW || !isGoodLinkMW(target)) return false;
-            try { window.onbeforeunload = null; } catch (e) {}
+            try { win.onbeforeunload = null; } catch (e) {}
             _navigatedMW = true;
-            try { location.assign(target); } catch (e) {}
+            try { win.location.assign(target); } catch (e) {}
             return true;
         }
 
@@ -2647,7 +2658,7 @@
                 }
             }
             r = a.join("");
-            try { r = atob(r); } catch (e) { return null; }
+            try { r = win.atob(r); } catch (e) { return null; }
             r = r.substring(r.length - (r.length - 16));
             r = r.substring(0, r.length - 16);
             return r;
@@ -2655,7 +2666,7 @@
 
         let _ysmmSeen = false;
         try {
-            Object.defineProperty(window, "ysmm", {
+            Object.defineProperty(win, "ysmm", {
                 configurable: true,
                 set: function(r) {
                     if (typeof r !== "string" || _ysmmSeen) return;
@@ -2669,7 +2680,7 @@
 
         try {
             const _safelinkForced = { counter: 0, adblock: false, click2x: false };
-            Object.defineProperty(window, "safelink", {
+            Object.defineProperty(win, "safelink", {
                 configurable: true,
                 set: v => {
                     if (v && typeof v === "object") {
@@ -2683,14 +2694,14 @@
         } catch (e) {}
 
         try {
-            Object.defineProperty(window, "soralink", {
+            Object.defineProperty(win, "soralink", {
                 configurable: true,
                 get: () => ({})
             });
         } catch (e) {}
 
         try {
-            Object.defineProperty(window, "adtival_base64_encode", {
+            Object.defineProperty(win, "adtival_base64_encode", {
                 configurable: true,
                 get: () => undefined
             });
@@ -2700,7 +2711,7 @@
             const _downloadBtnNav = a => {
                 if (a && a.href && isGoodLinkMW(a.href)) navigateMW(a.href);
             };
-            Object.defineProperty(window, "downloadButton", {
+            Object.defineProperty(win, "downloadButton", {
                 configurable: true,
                 set: a => { _downloadBtnNav(a); },
                 get: () => null
@@ -2708,16 +2719,16 @@
         } catch (e) {}
 
         try {
-            if (location.href.indexOf("?r=") !== -1) {
-                const m = /[?&]r=([^&]+)/.exec(location.search);
+            if (win.location.href.indexOf("?r=") !== -1) {
+                const m = /[?&]r=([^&]+)/.exec(win.location.search);
                 if (m) {
                     const r = safeDec(m[1]);
                     const d = safeAtob(r);
                     if (d && /^https?:\/\//i.test(d) && isGoodLinkMW(d)) navigateMW(d);
                 }
             }
-            if (location.href.indexOf("?dest=") !== -1 || location.href.indexOf("&dest=") !== -1) {
-                const md = /[?&]dest=([^&]+)/.exec(location.search);
+            if (win.location.href.indexOf("?dest=") !== -1 || win.location.href.indexOf("&dest=") !== -1) {
+                const md = /[?&]dest=([^&]+)/.exec(win.location.search);
                 if (md) {
                     const dd = safeDec(md[1]);
                     if (dd && /^https?:\/\//i.test(dd) && isGoodLinkMW(dd)) navigateMW(dd);
@@ -2738,7 +2749,7 @@
             // IP Logger Check
             if (cfg.blockIPLoggers) {
                 try {
-                    const h = new URL(s, location.origin).hostname.toLowerCase();
+                    const h = new URL(s, win.location.origin).hostname.toLowerCase();
                     if (IP_LOG_MW_RE.test(h)) return "iplogger";
                 } catch (e) {}
             }
@@ -2747,11 +2758,11 @@
 
         // Consolidated Hook 1: Navigator.prototype.sendBeacon (Unified!)
         try {
-            const sb = Navigator.prototype.sendBeacon;
+            const sb = NavigatorProto.sendBeacon;
             if (sb) {
                 const sba = Function.prototype.apply.bind(sb);
                 const isTrack = RegExp.prototype.test.bind(/^(?:(?:https?:\/\/[^\/]+)?\/)?gen_204(?:[?#]|$)/);
-                Navigator.prototype.sendBeacon = function(u) {
+                NavigatorProto.sendBeacon = function(u) {
                     try {
                         loadCfg();
                         if (isTrack(u) && cfg.noping) return true;
@@ -2764,10 +2775,10 @@
 
         // Consolidated Hook 2: window.fetch (Unified!)
         try {
-            const f = window.fetch;
+            const f = win.fetch;
             if (f) {
                 const fa = Function.prototype.apply.bind(f);
-                window.fetch = function(input, opts) {
+                win.fetch = function(input, opts) {
                     try {
                         loadCfg();
                         const u = typeof input === "string" ? input : (input && input.url ? input.url : "");
@@ -2788,11 +2799,11 @@
 
         // Consolidated Hook 3: XMLHttpRequest (Unified & Clean Async state machine mocking!)
         try {
-            const xo = XMLHttpRequest.prototype.open;
-            const xs = XMLHttpRequest.prototype.send;
+            const xo = XMLHttpRequestProto.open;
+            const xs = XMLHttpRequestProto.send;
             const blockMap = new WeakMap();
 
-            XMLHttpRequest.prototype.open = function(m, u) {
+            XMLHttpRequestProto.open = function(m, u) {
                 try {
                     loadCfg();
                     blockMap.set(this, !!shouldBlock(u));
@@ -2800,11 +2811,10 @@
                 return xo.apply(this, arguments);
             };
 
-            XMLHttpRequest.prototype.send = function() {
+            XMLHttpRequestProto.send = function() {
                 if (blockMap.get(this) === true) {
                     const self = this;
-                    // Bug Fix: Asynchronous state completion mock to support Axios, jQuery etc.
-                    setTimeout(() => {
+                    win.setTimeout(() => {
                         try {
                             Object.defineProperties(self, {
                                 readyState: { configurable: true, get: () => 4 },
@@ -2826,11 +2836,11 @@
 
         // Consolidated Hook 4: HTMLImageElement.prototype.src (Unified!)
         try {
-            const ip = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+            const ip = Object.getOwnPropertyDescriptor(HTMLImageElementProto, "src");
             if (ip && ip.set) {
                 const ig = Function.prototype.call.bind(ip.get);
                 const is = Function.prototype.call.bind(ip.set);
-                Object.defineProperty(HTMLImageElement.prototype, "src", {
+                Object.defineProperty(HTMLImageElementProto, "src", {
                     configurable: true,
                     enumerable: true,
                     get: function() { return ig(this); },
@@ -2854,9 +2864,8 @@
 
         // Consolidated Hook 5: EventSource proxy
         try {
-            const OES = window.EventSource;
-            if (OES) {
-                window.EventSource = new Proxy(OES, {
+            if (EventSourceRef) {
+                win.EventSource = new Proxy(EventSourceRef, {
                     construct: function(T, args) {
                         loadCfg();
                         if (args[0] && shouldBlock(args[0])) {
@@ -2866,7 +2875,6 @@
                             d.close = () => {};
                             return d;
                         }
-                        // Bug Fix: Use Reflect.construct for modern, highly optimized instantiation
                         return Reflect.construct(T, args);
                     }
                 });
@@ -2875,43 +2883,44 @@
 
         // Consolidated Hook 6: window.open and metarefresh
         try {
-            const ow = window.open;
-            window.open = function(url, name, features) {
+            const ow = win.open;
+            win.open = function(url, name, features) {
                 const blank = !url || url === "about:blank";
                 try {
                     if (!blank) {
-                        const a = document.createElement("a");
+                        const a = doc.createElement("a");
                         a.href = url;
                         const r = realLink(a);
                         if (r) a.href = r;
                         url = a.href;
-                        if (policy() && a.origin !== location.origin && !isG(a.hostname) && !/\b(?:opener|noreferrer)\b/.test(features || "")) {
+                        if (policy() && a.origin !== win.location.origin && !isG(a.hostname) && !/(?:opener|noreferrer)/.test(features || "")) {
                             features = (features ? features + "," : "") + "noreferrer";
                         }
                     }
                 } catch (e) {}
-                const win = ow.call(this, url, name, features);
+                const winRef = ow.call(this, url, name, features);
                 try {
-                    if (blank && win) {
-                        const dw = win.Function.prototype.call.bind(win.document.write);
-                        win.document.write = function(html) {
+                    if (blank && winRef) {
+                        const dw = winRef.Function.prototype.call.bind(winRef.document.write);
+                        winRef.document.write = function(html) {
                             try { html = fixMeta(html); } catch (e) {}
                             return dw(this, html);
                         };
                     }
                 } catch (e) {}
-                return win;
+                return winRef;
             };
 
             function fixMeta(html) {
                 html = String(html || "");
-                return html.replace(/<meta[^>]*http-equiv=(["']?)refresh\1[^>]*>/i, function(m) {
-                    const doc = (new DOMParser()).parseFromString(m, "text/html");
-                    const meta = doc.querySelector("meta[http-equiv=refresh]");
+                return html.replace(/<meta[^>]*http-equiv=(["']?)refresh[^>]*>/i, function(m) {
+                    const documentParser = new DOMParser();
+                    const parsedDoc = documentParser.parseFromString(m, "text/html");
+                    const meta = parsedDoc.querySelector("meta[http-equiv=refresh]");
                     if (!meta) return m;
                     const parts = /^(\d*\s*;\s*url=)(.+)$/i.exec(meta.content);
                     if (!parts) return m;
-                    const a = document.createElement("a");
+                    const a = doc.createElement("a");
                     a.href = parts[2];
                     const r = realLink(a);
                     if (r) a.href = r;
@@ -2923,9 +2932,8 @@
 
         // Consolidated Hook 7: WebSocket IP logger proxy
         try {
-            const _ipWS = window.WebSocket;
-            if (_ipWS) {
-                window.WebSocket = new Proxy(_ipWS, {
+            if (WebSocketRef) {
+                win.WebSocket = new Proxy(WebSocketRef, {
                     construct: function(T, args) {
                         loadCfg();
                         if (args[0] && shouldBlock(args[0]) === "iplogger") return {};
@@ -2939,24 +2947,24 @@
         if (cfg.blockPrivacySandbox) {
             try {
                 const privFn = () => Promise.resolve([]);
-                if (document.browsingTopics) {
-                    try { Object.defineProperty(document, "browsingTopics", { configurable: true, writable: true, value: privFn }); } catch (e) {}
+                if (doc.browsingTopics) {
+                    try { Object.defineProperty(doc, "browsingTopics", { configurable: true, writable: true, value: privFn }); } catch (e) {}
                 }
-                if (document.interestCohort) {
-                    try { Object.defineProperty(document, "interestCohort", { configurable: true, writable: true, value: privFn }); } catch (e) {}
+                if (doc.interestCohort) {
+                    try { Object.defineProperty(doc, "interestCohort", { configurable: true, writable: true, value: privFn }); } catch (e) {}
                 }
                 const joinAd = () => Promise.resolve();
                 [ "joinAdInterestGroup", "leaveAdInterestGroup", "runAdAuction", "updateAdInterestGroups", "createAuctionNonce" ].forEach(fn => {
                     try {
-                        if (navigator[fn]) {
-                            Object.defineProperty(navigator, fn, { configurable: true, writable: true, value: joinAd });
+                        if (win.navigator[fn]) {
+                            Object.defineProperty(win.navigator, fn, { configurable: true, writable: true, value: joinAd });
                         }
                     } catch (e) {}
                 });
                 try {
-                    const wm = Object.getOwnPropertyDescriptor(window, "sharedStorage");
+                    const wm = Object.getOwnPropertyDescriptor(win, "sharedStorage");
                     if (wm) {
-                        Object.defineProperty(window, "sharedStorage", {
+                        Object.defineProperty(win, "sharedStorage", {
                             configurable: true,
                             get: () => undefined,
                             set: () => {}
@@ -2966,6 +2974,8 @@
             } catch (e) {}
         }
     }
+
+
 
     let _ttp = null;
     function getTTP() {
@@ -3816,6 +3826,8 @@
     pushConfigToPage();
     getNonce();
     injectMainWorld();
+    const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+    ntMainWorldBoot(win);
 
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", function() {
