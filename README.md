@@ -17,32 +17,38 @@ In previous versions, analytical APIs and network interfaces (such as `window.fe
 * **Consolidated Descriptors:** All network wrappers are consolidated into exactly **one** property descriptor/method proxy per API.
 * **Zero Stack Bloat:** All blockers share a unified match machine, speeding up hot-path operations like image and fetch loading.
 
-### 2. 🐛 Safe URL Decoding (No Delimiter Corruption or URI Errors)
+### 2. 🔌 Dynamic Website Restriction Bypasses (User-Gesture Activated)
+Intentionally malicious or restrictive scripts on certain websites prevent standard browser actions (like copying text, highlighting, or opening standard right-click context menus). Wildcard methods that globally disable these blocks often break complex web layouts or UI components (like buttons, menus, and custom sliders).
+* **Target-Smart Context Menu Unblocker:** Bypasses blocking events in the capturing phase, completely neutralizing `oncontextmenu` blocking scripts and inline `return false` elements on a per-site basis.
+* **Target-Smart Selection Unblocker:** Intercepts `selectstart` and `dragstart` events. On `mousedown`, it dynamically traverses the parent DOM tree to remove any `user-select: none` CSS rules **only on the active selection path**, leaving rest of the page UI untouched!
+* **Safe, Non-Wildcard Design:** These options are **completely disabled by default** and are only activated via a simple toggle in the GUI on a per-site basis.
+
+### 3. 🐛 Safe URL Decoding (No Delimiter Corruption or URI Errors)
 Previously, URL validation would call `decodeURI` directly on raw link strings. This introduced two critical failure modes:
 1. It crashed on malformed percentage-encoded URLs (e.g., URLs containing literal `%` characters that aren't valid hexadecimal encodings), bypassing the scrubbing logic entirely.
 2. It prematurely decoded encoded delimiters (like `%3F` for `?` or `%26` for `&`) inside redirection query parameters. This corrupted the URL structure and caused native URL parsers to misidentify the query arguments.
 * **The Fix:** Raw URLs are parsed safely using the browser's native `new URL` constructor first, and parameter values are decoded individually only when necessary.
 
-### 3. 🔒 Safe & Sandboxed Local Storage Fallbacks
+### 4. 🔒 Safe & Sandboxed Local Storage Fallbacks
 If run in an environment without privileged `GM_setValue` / `GM_getValue` managers, NullTrail fell back to writing the entire 300KB ClearURLs rules database into the site's own `localStorage`. This presented serious security and resource issues:
 1. It leaked user configuration, whitelisted domains, and usage stats to the website's own scripts, violating privacy.
 2. It heavily consumed the website's 5MB `localStorage` quota, breaking page functionality on heavy sites.
 * **The Fix:** The script is optimized to **never** save the massive rule cache in a webpage's local storage. Only tiny, non-sensitive options like `globalStatus` are written, while rules remain securely in memory.
 
-### 4. 📋 Smart Clipboard & Selection-Safe Text Copying
+### 5. 📋 Smart Clipboard & Selection-Safe Text Copying
 The legacy copy listener intercepted any copy event inside a link and replaced the entire clipboard text with the link's URL. This broke standard browser functionality, preventing users from copying text fragments inside links.
 * **The Fix:** Redesigned from scratch:
   * If the user selects exactly a URL string, the clipboard receives the fully sanitized URL.
   * If the user copies a rich text selection spanning across links, it clones the selection and sanitizes **only the underlying link targets (`href`)** in both plain text and HTML formats, keeping the selected text fully intact.
 
-### 5. ⚡ Automated & Multi-Step Cookie Consent Rejection
+### 6. ⚡ Automated & Multi-Step Cookie Consent Rejection
 Previously, a single global boolean `_consentClicked` stopped the auto-reject engine after clicking one button. This failed to handle modern multi-step consent dialogs or dynamic, newly rendered banners.
 * **The Fix:** Implemented a modern `WeakSet` of clicked elements. This allows the script to handle dynamic forms, newly spawned overlays, or sub-dialog rejection buttons perfectly.
 
-### 6. 🌐 Enhanced Rule Syncing & Failovers
+### 7. 🌐 Enhanced Rule Syncing & Failovers
 * **Failover Mirroring:** Added the official GitLab raw repository to `RULE_URLS` and `HASH_URLS` as a fallback. If the primary `clearurls.xyz` domain is down or rate-limited, NullTrail automatically falls back to GitLab to update rule definitions seamlessly.
 
-### 7. 🎨 Zero-Jargon User Friendly Dashboard
+### 8. 🎨 Zero-Jargon User Friendly Dashboard
 All technical, developer-centric terminology in the GUI has been redesigned to be fully accessible and friendly to non-technical users, without changing any of the robust underlying variables:
 * *Before:* "SERP parameter cleanup" ➔ **After:** "Clean Search Engine Result Links"
 * *Before:* "Block GA/GTM beacons" ➔ **After:** "Block Web Analytics & Tracking Beacons"
@@ -50,7 +56,7 @@ All technical, developer-centric terminology in the GUI has been redesigned to b
 * *Before:* "Strip anchor ping" ➔ **After:** "Block Link Click Auditing & Beacons"
 * *Before:* "Add rel=noopener" ➔ **After:** "Secure Multi-tab Browsing"
 
-### 8. 🛠️ Robust isolated-world bindings
+### 9. 🛠️ Robust isolated-world bindings
 Corrected domain-specific bypass rules (such as `xlink.cc`) that looked for global variables (like `bootstrapData`) in the isolated userscript scope. The code now safely bridges boundaries via `unsafeWindow` where available.
 
 ---
