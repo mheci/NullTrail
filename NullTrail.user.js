@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NullTrail — Universal Tracking & Redirect Scrubber
 // @namespace    https://github.com/nulltrail
-// @version      2.0.0
+// @version      2.1.0
 // @description  Fix the web.
 // @license      Unlicense
 // @author       NullTrail
@@ -1062,14 +1062,15 @@
         autoUpdateRules: GV("autoUpdateRules", true),
         statistics: GV("statistics", true),
         logging: GV("logging", false),
-        debug: GV("debug", false)
+        debug: GV("debug", false),
+        activeAdObfuscation: GV("activeAdObfuscation", false)
     };
 
     let WHITELIST = GV("whitelist", "");
 
     // User-requested site-specific settings maps
     let unblockContextMenuSites = GV("unblockContextMenuSites", {});
-    let unblockTextSelectionSites = GV("unblockTextSelectionSites", {});
+    let unblockTextSelectionSites = GV("unblockTextSelectionSites", "activeAdObfuscation", {});
 
     function isWhitelisted(host) {
         if (!host || !WHITELIST) return false;
@@ -3276,6 +3277,86 @@
         });
     }
 
+    // AdNauseam-Style Active Ad & Tracker Obfuscation (Generates noise to poison advertising profiles)
+    const AD_TRACKER_HOSTS_RE = /(?:^|\.)(?:googleadservices\.com|doubleclick\.net|doubleclick\.com|adnxs\.com|advertising\.com|openx\.net|rubiconproject\.com|pubmatic\.com|criteo\.com|casalemedia\.com|adroll\.com|yieldmanager\.com|flashtalking\.com|outbrain\.com|taboola\.com)$/i;
+    const AD_QUERY_PARAMS_RE = /[?&](?:adurl|clickid|click_id|affid|affiliate|gclid|srsltid|twclid|fbclid|yclid)=/i;
+    const _clickedAdURLs = new Set();
+    let _bgClicksCount = 0;
+
+    function simulateAdClick(url) {
+        if (!CFG.activeAdObfuscation || _bgClicksCount >= 5) return;
+        try {
+            const parsed = new URL(url, location.href);
+            const cleanUrl = parsed.origin + parsed.pathname + parsed.search;
+
+            if (_clickedAdURLs.has(cleanUrl)) return;
+            _clickedAdURLs.add(cleanUrl);
+            _bgClicksCount++;
+
+            // Mimic AdNauseam: dispatch anonymous, cookie-less background request with custom headers
+            // and random delay to simulate natural human clicking behaviors
+            const delay = 1500 + Math.random() * 3500;
+            setTimeout(() => {
+                log("Simulating background ad-click (AdNauseam-Style) to poison profile:", cleanUrl);
+                if (typeof GM_xmlhttpRequest === "function") {
+                    GM_xmlhttpRequest({
+                        method: "GET",
+                        url: cleanUrl,
+                        anonymous: true, // Strips cookies to protect privacy
+                        headers: {
+                            "DNT": "1",
+                            "Sec-GPC": "1",
+                            "User-Agent": navigator.userAgent,
+                            "Referer": location.href
+                        },
+                        onload: () => {}, // Discard response safely
+                        onerror: () => {}
+                    });
+                } else if (typeof fetch === "function") {
+                    fetch(cleanUrl, {
+                        method: "GET",
+                        credentials: "omit", // Strips cookies
+                        mode: "no-cors",
+                        headers: {
+                            "DNT": "1",
+                            "Sec-GPC": "1"
+                        }
+                    }).catch(() => {});
+                }
+            }, delay);
+        } catch (e) {}
+    }
+
+    function scanAndClickAds() {
+        if (!CFG.activeAdObfuscation || _bgClicksCount >= 5) return;
+        try {
+            const anchors = document.querySelectorAll("a[href]");
+            for (let i = 0; i < anchors.length; i++) {
+                if (_bgClicksCount >= 5) break;
+                const a = anchors[i];
+                const href = a.href;
+                if (!href) continue;
+                
+                let isAd = false;
+                try {
+                    const u = new URL(href, location.href);
+                    const h = u.hostname.toLowerCase();
+                    if (AD_TRACKER_HOSTS_RE.test(h) || AD_QUERY_PARAMS_RE.test(u.search)) {
+                        isAd = true;
+                    }
+                } catch (e) {
+                    if (href.indexOf("googleadservices") > -1 || href.indexOf("/pagead/aclk") > -1) {
+                        isAd = true;
+                    }
+                }
+                
+                if (isAd) {
+                    simulateAdClick(href);
+                }
+            }
+        } catch (e) {}
+    }
+
     // Network-Budgeted Idle Frame DOM Link Cleaner (Keeps UI buttery smooth at 60/120fps)
     let linkCleaningQueue = [];
     let isCleanupScheduled = false;
@@ -3295,6 +3376,7 @@
             }
         } else {
             isCleanupScheduled = false;
+            scanAndClickAds();
         }
     }
 
@@ -3664,6 +3746,11 @@
             [ "purgeStorage", "Clear Hidden Website Trackers" ] 
         ]
     }, {
+        title: "Active Profile Obfuscation",
+        items: [ 
+            [ "activeAdObfuscation", "Generate Bogus Ad Clicks (AdNauseam-Style)" ] 
+        ]
+    }, {
         title: "Privacy Settings Presets",
         items: [ 
             [ "enforcePrivacyPresets", "Enforce Maximum Shielding automatically" ] 
@@ -3696,7 +3783,7 @@
         const hdr = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06)");
         const hdrLeft = ntEl("div", null, "display:flex;flex-direction:column");
         hdrLeft.appendChild(ntEl("span", "NullTrail", "font-size:17px;font-weight:700;color:#14b8a6"));
-        hdrLeft.appendChild(ntEl("span", "v2.0.0", "font-size:11px;color:#6b7280;margin-top:2px"));
+        hdrLeft.appendChild(ntEl("span", "v2.1.0", "font-size:11px;color:#6b7280;margin-top:2px"));
         hdr.appendChild(hdrLeft);
         const closeBtn = ntEl("button", "x", "background:none;border:none;color:#9ca3af;font-size:22px;cursor:pointer;padding:0 4px;line-height:1");
         closeBtn.title = "Close";
@@ -3831,7 +3918,7 @@
             cb2.addEventListener("change", function() {
                 if (cb2.checked) unblockTextSelectionSites[host] = true;
                 else delete unblockTextSelectionSites[host];
-                SV("unblockTextSelectionSites", unblockTextSelectionSites);
+                SV("unblockTextSelectionSites", "activeAdObfuscation", unblockTextSelectionSites);
                 pushConfigToPage();
             });
             row2.appendChild(cb2);
@@ -3903,7 +3990,7 @@
         }
 
         function renderAbout() {
-            content.appendChild(ntEl("div", "NullTrail v2.0.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "NullTrail v2.1.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
             content.appendChild(ntEl("div", "An autonomous, zero-jargon browser privacy engine fusing advanced hyperlink scrubbing, tracking parameter deletion, fast-forward redirect unwrapping, and strict analytical API shielding.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:14px"));
             const features = [ 
                 "40+ Search Engine Redirect unwrapping & sanitization", 
@@ -3924,7 +4011,7 @@
             const resetBtn = ntEl("button", "Reset all settings to default", "margin-top:16px;padding:8px 16px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#ef4444;font-size:12px;cursor:pointer");
             resetBtn.addEventListener("click", function() {
                 if (confirm("Are you sure you want to reset all NullTrail settings, whitelist sites, and cached rule databases?")) {
-                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites" ].forEach(DV);
+                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation" ].forEach(DV);
                     alert("Settings successfully reset. Please reload the webpage.");
                     container.remove();
                 }
@@ -3997,6 +4084,7 @@
             blockIPLoggerNav();
             scanDom();
             scanSpecial();
+            scanAndClickAds();
             pushConfigToPage();
             updateHUD();
             setTimeout(autoRejectConsent, 1000);
@@ -4012,6 +4100,7 @@
         blockIPLoggerNav();
         scanDom();
         scanSpecial();
+        scanAndClickAds();
         updateHUD();
         setTimeout(autoRejectConsent, 1000);
         setTimeout(autoRejectConsent, 3000);
@@ -4061,5 +4150,5 @@
     setTimeout(function() { updateRules(false); }, 3000);
     setInterval(function() { updateRules(false); }, 6 * 3600 * 1000);
 
-    log("NullTrail v2.0.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
+    log("NullTrail v2.1.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
 })();
