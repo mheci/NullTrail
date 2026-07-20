@@ -997,6 +997,8 @@
 // @match        *://*.googleadservices.com/*
 // @exclude      *://*/robots.txt*
 // @exclude      *://*.clearurls.xyz/*
+// @updateURL    https://raw.githubusercontent.com/mheci/NullTrail/main/NullTrail.user.js
+// @downloadURL  https://raw.githubusercontent.com/mheci/NullTrail/main/NullTrail.user.js
 // ==/UserScript==
 
 "use strict";
@@ -3496,7 +3498,7 @@
         const hdr = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06)");
         const hdrLeft = ntEl("div", null, "display:flex;flex-direction:column");
         hdrLeft.appendChild(ntEl("span", "NullTrail", "font-size:17px;font-weight:700;color:#14b8a6"));
-        hdrLeft.appendChild(ntEl("span", "v14.0.0", "font-size:11px;color:#6b7280;margin-top:2px"));
+        hdrLeft.appendChild(ntEl("span", "v1.0.0", "font-size:11px;color:#6b7280;margin-top:2px"));
         hdr.appendChild(hdrLeft);
         const closeBtn = ntEl("button", "x", "background:none;border:none;color:#9ca3af;font-size:22px;cursor:pointer;padding:0 4px;line-height:1");
         closeBtn.title = "Close";
@@ -3704,7 +3706,7 @@
         }
 
         function renderAbout() {
-            content.appendChild(ntEl("div", "NullTrail v14.0.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "NullTrail v1.0.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
             content.appendChild(ntEl("div", "An autonomous, zero-jargon browser privacy engine fusing advanced hyperlink scrubbing, tracking parameter deletion, fast-forward redirect unwrapping, and strict analytical API shielding.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:14px"));
             const features = [ 
                 "40+ Search Engine Redirect unwrapping & sanitization", 
@@ -3856,5 +3858,5 @@
     setTimeout(function() { updateRules(false); }, 3000);
     setInterval(function() { updateRules(false); }, 6 * 3600 * 1000);
 
-    log("NullTrail v14.0.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
+    log("NullTrail v1.0.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
 })();
