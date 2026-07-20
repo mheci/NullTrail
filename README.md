@@ -1,6 +1,6 @@
 # NullTrail — Universal Tracking & Redirect Scrubber
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-1.0.0-teal.svg)]()
 [![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)]()
 
@@ -61,4 +61,4 @@ Take control of your privacy with simple keyboard shortcuts anywhere on the web:
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is free and unencumbered software released into the public domain under The Unlicense - see the [LICENSE](LICENSE) file for details.
