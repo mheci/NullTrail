@@ -1064,6 +1064,10 @@
 
     let WHITELIST = GV("whitelist", "");
 
+    // User-requested feature: Per-site settings maps for Context Menu & Selection restrictions unblocking
+    let unblockContextMenuSites = GV("unblockContextMenuSites", {});
+    let unblockTextSelectionSites = GV("unblockTextSelectionSites", {});
+
     function isWhitelisted(host) {
         if (!host || !WHITELIST) return false;
         const lines = String(WHITELIST).split(/[\n,]+/);
@@ -1073,6 +1077,14 @@
             if (host === d || (host.length > d.length + 1 && host.lastIndexOf("." + d) === host.length - d.length - 1)) return true;
         }
         return false;
+    }
+
+    function isSiteContextMenuUnblocked() {
+        return !!unblockContextMenuSites[location.hostname.toLowerCase()];
+    }
+
+    function isSiteTextSelectionUnblocked() {
+        return !!unblockTextSelectionSites[location.hostname.toLowerCase()];
     }
 
     function isActive() {
@@ -1539,7 +1551,6 @@
         }, Promise.reject(new Error("init")));
     }
 
-     ShankHashed = sha256Hex;
     function sha256Hex(text) {
         try {
             return crypto.subtle.digest("SHA-256", (new TextEncoder()).encode(text)).then(buf => {
@@ -1586,7 +1597,6 @@
         }
     }
 
-     ShankDecoded = safeDecode;
     function safeDecode(s) {
         try {
             return decodeURIComponent(s);
@@ -1814,7 +1824,7 @@
         n: "walla",
         h: /(^|\.)search\.walla\.co\.il$/i,
         s: [ "e", "q", "l" ]
-    } ];
+    } ]
 
     const _engineCache = {};
     function getEngine(host) {
@@ -2281,7 +2291,7 @@
     const CONSENT_SELECTORS = [ "[id*=consent] button[id*=reject i], [id*=consent] button[id*=decline i], [id*=consent] button[id*=refuse i]", "[id*=consent] button[class*=reject i], [id*=consent] button[class*=decline i]", "[class*=consent] button[class*=reject i], [class*=consent] button[class*=decline i]", "[class*=cookie] button[class*=reject i], [class*=cookie] button[class*=decline i]", "button#onetrust-reject-all-handler", "button[data-cy=reject-cookies], button[aria-label*=reject i]", "a[href*=reject i], button[class*=opt-out i]", ".sp_choice_type_REJECT_ALL, .sp_choice_type_REJECT", "[data-testid=reject-cookies], [data-testid=cookie-policy-decline]", "button.fc-button[aria-label*=consent i]:not(.fc-cta-consent)", ".cmp-reject, .cookie-reject, #cookie-notice-reject", ".osano-cm-denyAll, .cm-btn-accept-all + button" ];
     
     // Bug Fix: Use WeakSet to allow auto-reject to run dynamically on re-rendered or multi-step banners
-    const _clickedConsents = new WeakSet();
+    let _clickedConsents = new WeakSet();
     function autoRejectConsent() {
         try {
             for (let i = 0; i < CONSENT_SELECTORS.length; i++) {
@@ -2398,7 +2408,9 @@
             blockGA: true,
             blockPrivacySandbox: true,
             blockKeepalive: true,
-            blockIPLoggers: true
+            blockIPLoggers: true,
+            unblockContextMenu: false,
+            unblockTextSelection: false
         };
         let _rawCfg = null;
 
@@ -2999,7 +3011,9 @@
                 blockGA: CFG.blockGA,
                 blockPrivacySandbox: CFG.blockPrivacySandbox,
                 blockKeepalive: CFG.blockKeepalive,
-                blockIPLoggers: CFG.blockIPLoggers
+                blockIPLoggers: CFG.blockIPLoggers,
+                unblockContextMenu: isSiteContextMenuUnblocked(),
+                unblockTextSelection: isSiteTextSelectionUnblocked()
             };
             m.setAttribute("content", btoa(unescape(encodeURIComponent(JSON.stringify(payload)))));
             window.dispatchEvent(new CustomEvent("nt:cfg"));
@@ -3315,6 +3329,50 @@
         if (e.button === 1) handleEl(e.target);
     }, true);
 
+    // Target-Smart Context Menu Unblocker (User Gesture Override via GUI)
+    document.addEventListener("contextmenu", function(e) {
+        if (isSiteContextMenuUnblocked()) {
+            // Stops propagation in capturing phase to neutralize any prevention handlers registered by page scripts
+            e.stopPropagation();
+        }
+    }, true);
+
+    // Target-Smart Text Selection Unblocker (User Gesture Override via GUI)
+    document.addEventListener("selectstart", function(e) {
+        if (isSiteTextSelectionUnblocked()) {
+            // Stop selectstart event prevention by website handlers
+            e.stopPropagation();
+        }
+    }, true);
+
+    document.addEventListener("dragstart", function(e) {
+        if (isSiteTextSelectionUnblocked()) {
+            const range = window.getSelection() ? window.getSelection().toString() : "";
+            if (range) {
+                // Stop dragstart interception if dragging selected text content
+                e.stopPropagation();
+            }
+        }
+    }, true);
+
+    document.addEventListener("mousedown", function(e) {
+        if (!isSiteTextSelectionUnblocked()) return;
+        // Targeted CSS override: dynamically walk path to remove user-select: none blocker, leaving non-selected layout intact
+        let el = e.target;
+        while (el && el !== document.documentElement) {
+            try {
+                const computed = window.getComputedStyle(el);
+                const userSelect = computed.userSelect || computed.webkitUserSelect;
+                if (userSelect === "none") {
+                    el.style.setProperty("user-select", "text", "important");
+                    el.style.setProperty("-webkit-user-select", "text", "important");
+                    log("dynamically restored text selection style on element:", el);
+                }
+            } catch (err) {}
+            el = el.parentElement;
+        }
+    }, true);
+
     document.addEventListener("dragstart", function(e) {
         const el = findAnchor(e.target);
         if (!el) return;
@@ -3402,7 +3460,7 @@
         items: [ 
             [ "blockGA", "Block Web Analytics & Tracking Beacons" ], 
             [ "blockPrivacySandbox", "Block Google Ad Interest Tracking" ], 
-            [ "blockKeepalive", "Block Connection Logs on Close" ], 
+            [ "blockKeepalive", "Block Background Connection Tracking" ], 
             [ "blockIPLoggers", "Block Suspicious Location Trackers" ], 
             [ "blockBounceRedirect", "Skip Middleman Link Redirects" ] 
         ]
@@ -3410,7 +3468,7 @@
         title: "Browser Cleanup",
         items: [ 
             [ "purgeGACookies", "Clear Search Analytics Cookies" ], 
-            [ "purgeStorage", "Clear Hidden Tracking Storage" ] 
+            [ "purgeStorage", "Clear Hidden Website Trackers" ] 
         ]
     }, {
         title: "Privacy Settings Presets",
@@ -3542,6 +3600,44 @@
             content.appendChild(taRow);
             content.appendChild(ntEl("div", "Current Website: " + location.hostname, "font-size:11px;color:#6b7280;margin-top:10px"));
             content.appendChild(ntEl("div", "Protection Status: " + (isActive() ? "ACTIVE (Shielded)" : "DISABLED (Excluded)"), "font-size:11px;font-weight:600;margin-top:2px;color:" + (isActive() ? "#14b8a6" : "#ef4444")));
+
+            // User-requested site-specific browser restriction unblock options (Only active on explicitly toggling per site!)
+            content.appendChild(ntEl("div", "Website Restrictions Bypass", "font-size:14px;font-weight:600;margin-top:20px;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "Selectively unblock standard browser features on this specific website. (These options are safe and target-specific with no broad wildcards):", "font-size:12px;color:#9ca3af;margin-bottom:12px;line-height:1.4"));
+
+            const host = location.hostname.toLowerCase();
+
+            // Toggle 1: Context Menu
+            const row1 = ntEl("label", null, "display:flex;align-items:center;justify-content:space-between;padding:8px 0;cursor:pointer;font-size:13px;color:#dfe4ee");
+            row1.appendChild(ntEl("span", "Enable standard right-click context menus"));
+            const cb1 = document.createElement("input");
+            cb1.type = "checkbox";
+            cb1.checked = !!unblockContextMenuSites[host];
+            ntStyle(cb1, "width:18px;height:18px;accent-color:#14b8a6;cursor:pointer");
+            cb1.addEventListener("change", function() {
+                if (cb1.checked) unblockContextMenuSites[host] = true;
+                else delete unblockContextMenuSites[host];
+                SV("unblockContextMenuSites", unblockContextMenuSites);
+                pushConfigToPage();
+            });
+            row1.appendChild(cb1);
+            content.appendChild(row1);
+
+            // Toggle 2: Text Selection
+            const row2 = ntEl("label", null, "display:flex;align-items:center;justify-content:space-between;padding:8px 0;cursor:pointer;font-size:13px;color:#dfe4ee");
+            row2.appendChild(ntEl("span", "Enable standard text selection and copy"));
+            const cb2 = document.createElement("input");
+            cb2.type = "checkbox";
+            cb2.checked = !!unblockTextSelectionSites[host];
+            ntStyle(cb2, "width:18px;height:18px;accent-color:#14b8a6;cursor:pointer");
+            cb2.addEventListener("change", function() {
+                if (cb2.checked) unblockTextSelectionSites[host] = true;
+                else delete unblockTextSelectionSites[host];
+                SV("unblockTextSelectionSites", unblockTextSelectionSites);
+                pushConfigToPage();
+            });
+            row2.appendChild(cb2);
+            content.appendChild(row2);
         }
 
         function renderStats() {
@@ -3629,7 +3725,7 @@
             const resetBtn = ntEl("button", "Reset all settings to default", "margin-top:16px;padding:8px 16px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#ef4444;font-size:12px;cursor:pointer");
             resetBtn.addEventListener("click", function() {
                 if (confirm("Are you sure you want to reset all NullTrail settings, whitelist sites, and cached rule databases?")) {
-                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "statCleaned", "statFields", "statBlocked" ].forEach(DV);
+                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites" ].forEach(DV);
                     alert("Settings successfully reset. Please reload the webpage.");
                     ov.remove();
                 }
