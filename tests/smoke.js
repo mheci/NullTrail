@@ -323,6 +323,50 @@ async function main() {
     ok((_consentFixture.goodEl.clicked || 0) === 1, "genuine decline button clicked once (got: " + (_consentFixture.goodEl.clicked || 0) + ")");
     ok((_consentFixture.malEl.clicked || 0) === 0, "article link containing 'reject' NEVER auto-clicked (got: " + (_consentFixture.malEl.clicked || 0) + ")");
 
+    // -----------------------------------------------------------------------
+    // Test 9 (v2.6.0): malformed percent-encoding in a redirect wrapper must
+    // NEVER throw (decodeURIComponent URIError previously crashed the whole
+    // cleaning pass) and must not corrupt the link beyond leaving it as-is.
+    // -----------------------------------------------------------------------
+    console.log("\n== Test 9: malformed-encoding robustness ==");
+    const malformed = "https://www.google.com/url?q=" + encodeURIComponent("https://dest.example/%E0%A4");
+    const a9 = makeClickable(malformed);
+    let threw = false;
+    try {
+        fire("click", clickEvent(a9), true);
+    } catch (e) {
+        threw = true;
+    }
+    ok(!threw, "malformed redirect wrapper does not throw");
+    ok(typeof a9.href === "string" && a9.href.length > 0, "link survives malformed wrapper (got: " + a9.href + ")");
+
+    // -----------------------------------------------------------------------
+    // Test 10 (v2.6.0): lookalike hostnames must NOT be unwrapped. The DDG and
+    // Yahoo MAIN-WORLD unwrapper patterns lacked domain boundaries, so page JS
+    // assigning a "notduckduckgo.com" link would have had it rewritten.
+    // (Content world was already protected by the ENGINES host gate.)
+    // -----------------------------------------------------------------------
+    console.log("\n== Test 10: unwrapper host-boundary precision ==");
+    const a10 = Object.create(global.HTMLAnchorElement.prototype);
+    a10.tagName = "A";
+    const ddgLook = "https://notduckduckgo.com/l/?uddg=" + encodeURIComponent("https://target.example/x");
+    a10.href = ddgLook;
+    ok(a10._hrefStore === ddgLook,
+        "main-world setter: lookalike notduckduckgo.com left untouched (got: " + a10._hrefStore + ")");
+    const a10b = Object.create(global.HTMLAnchorElement.prototype);
+    a10b.tagName = "A";
+    const yahooLook = "https://evilsearch.yahoo.com/RU=" + encodeURIComponent("https://target.example/z") + "/RK=2";
+    a10b.href = yahooLook;
+    ok(a10b._hrefStore === yahooLook,
+        "main-world setter: lookalike evilsearch.yahoo.com left untouched (got: " + a10b._hrefStore + ")");
+    // Sanity: the REAL hosts still unwrap through the same setter.
+    const a10c = Object.create(global.HTMLAnchorElement.prototype);
+    a10c.tagName = "A";
+    const ddgReal = "https://duckduckgo.com/l/?uddg=" + encodeURIComponent("https://target.example/ok");
+    a10c.href = ddgReal;
+    ok(a10c._hrefStore === "https://target.example/ok",
+        "main-world setter: genuine duckduckgo.com still unwrapped (got: " + a10c._hrefStore + ")");
+
     console.log("\n== Summary ==");
     if (failures.length) {
         console.log(failures.length + " failure(s)");

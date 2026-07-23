@@ -30,9 +30,10 @@ jobs:
       - name: Run Regression Harness (core)
         run: |
           node tests/smoke.js
-          for c in bing google duckduckgo; do
+          for c in bing google duckduckgo perplexity walla; do
             NT_CASE=$c node tests/smoke-engines.js
           done
+          node tests/perf-check.js
           echo "✓ Core regression tests passed!"
 
       - name: Run Regression Harness (network friendliness)

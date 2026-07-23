@@ -2,6 +2,62 @@
 
 All notable changes to NullTrail are documented in this file.
 
+## [2.6.0] — 2026-07-23
+
+**Theme: third 10-pass audit round** — fresh themes per pass (update-checker
+truthfulness, unwrapper precision, engine strip-list query-param collisions,
+exception safety, lifecycle, accessibility, `@match` coverage, API mock
+completeness, async hardening, full re-review). Full ledger in
+[AUDIT.md](AUDIT.md) (Round 3).
+
+### Fixed
+- **The update checker now tells the truth.** `updateRules()` previously
+  swallowed every failure path and resolved vacuously, so the dashboard's
+  "Check for updates now" button always reported *"Updated successfully"* —
+  even when all three rule feeds were unreachable, the SHA-256 verification
+  failed, or the payload was rejected. It now resolves with an explicit result
+  (`updated` / `current` / `failed` / `busy` / `skipped`), the button renders
+  the real outcome, and the Rules tab shows *Last Update Check* and *Last
+  Update Result* rows so you can verify the updater's health at a glance.
+- **Engine strip-lists were deleting the search query itself.** Walla
+  (`search.walla.co.il`) and Perplexity both listed `q` — the engine's query
+  parameter — in their strip lists, emptying the search on reload and
+  destroying shared result links. `q` is now preserved on both engines;
+  regression tests lock it in.
+- **Lookalike-host unwrapping precision**: the DuckDuckGo, Yahoo, and Yandex
+  unwrapper regexes lacked proper domain boundaries (`/duckduckgo\.com$/`
+  matched `notduckduckgo.com`). All now require a start/dot boundary, in both
+  the content world and the main-world copies.
+- **Malformed percent-encoding could crash cleaning**: `extractGoogleRedirect`
+  ran raw `decodeURIComponent` on attacker-controlled captures — a truncated
+  escape (`%E0%A4`) throws `URIError`, killing the sanitize pass. All decodes
+  on the hot path now go through `safeDecode`, and the idle-queue loop plus
+  per-anchor sanitize are individually exception-isolated so one bad link can
+  never stop cleaning for the rest of the page.
+- **Hover redirect-resolver leak**: the GM HEAD request had no timeout — a hung
+  request permanently consumed one of the 25-per-page budget slots.
+- **Statistics lost on tab close**: pending counter deltas (1.5 s debounce
+  window) are now flushed on `pagehide` and on backgrounding
+  (`visibilitychange`), and the Stats tab reads fresh cross-tab storage merged
+  with pending deltas instead of page-load-time counters.
+
+### Improved / hardened
+- **AMP cache coverage**: added `@match` for `cdn.ampproject.org` — the AMP
+  viewer unwrapper existed but never ran when landing on an AMP URL directly.
+- **Dashboard accessibility**: real dialog semantics (`role=dialog`,
+  `aria-modal`, labelled tabs with `aria-selected`), focus moves into the
+  dialog on open and returns to your place on close, and the close button is a
+  proper `×` with an accessible name. Esc/backdrop close still work.
+- **Blocked-request mocks are crash-proof**: the fake `EventSource` and
+  `WebSocket` objects returned for blocked endpoints now expose no-op
+  `addEventListener`/`send`/`close` surfaces — sites attaching handlers to a
+  blocked stream no longer hit "Illegal invocation".
+- **Testing**: new cases for malformed-encoding robustness, lookalike-host
+  precision, Perplexity/Walla query preservation, a perf guard benchmark
+  (~90µs/cold clean, ~5µs/repeat), and stricter release metadata checks
+  (update-checker contract, AMP match, decode safety, regex boundaries) — all
+  wired into CI.
+
 ## [2.5.0] — 2026-07-23
 
 **Theme: second 10-pass hardening round** — fresh themes per pass (regex safety,
