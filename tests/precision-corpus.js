@@ -1,9 +1,7 @@
-// NullTrail performance guard — boots the userscript with stubbed browser
-// globals and times bulk link cleaning through the real click pipeline.
-// Purpose: catch accidental complexity regressions (e.g. an O(n) scan
-// reintroduced into a per-link hot path). The threshold is deliberately
-// generous so it never flakes on loaded CI runners — it exists to catch
-// ORDERS-OF-MAGNITUDE regressions, not micro-jitter.
+// NullTrail PRECISION-BUDGET CI (#26) — the project's prime directive as code:
+// "One broken website is worse than ten missed trackers."
+// Every URL below is a REAL-WORLD FUNCTIONAL pattern that must pass through the
+// sanitizer BYTE-IDENTICAL. Any change = build failure, no exceptions.
 "use strict";
 
 const failures = [];
@@ -87,6 +85,7 @@ global.Event = class { constructor(t) { this.type = t; } };
 global.dispatchEvent = () => true;
 global.addEventListener = () => {};
 global.window = global;
+global.IntersectionObserver = class { constructor(cb) {} observe() {} unobserve() {} };
 
 require("node:module").createRequire(__filename)(require("node:path").resolve(__dirname, "..", "NullTrail.user.js"));
 
@@ -100,37 +99,74 @@ function clickEvent(el) {
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark 1: 3,000 distinct dirty links through the click pipeline (LRU misses)
+// MUST-NOT-CHANGE corpus: functional URLs that must survive Byte-Identical.
 // ---------------------------------------------------------------------------
-const N1 = 3000;
-const anchors = [];
-for (let i = 0; i < N1; i++) {
-    anchors.push(makeClickable("https://track.example.net/p" + i + "?utm_source=n&utm_medium=e&id=" + i + "&fbclid=z" + i));
-}
-let t0 = process.hrtime.bigint();
-for (let i = 0; i < N1; i++) fire("click", clickEvent(anchors[i]), true);
-let ms1 = Number(process.hrtime.bigint() - t0) / 1e6;
-console.log("  INFO  " + N1 + " cold cleans (LRU miss): " + ms1.toFixed(1) + "ms => " + (ms1 * 1000 / N1).toFixed(1) + "us/clean");
-ok(anchors[N1 - 1].href.indexOf("utm_") === -1 && anchors[N1 - 1].href.indexOf("id=") > -1, "bulk clean correctness (trackers stripped, id kept)");
-ok(ms1 < 5000, "cold-clean throughput under budget (" + ms1.toFixed(0) + "ms < 5000ms)");
-// v3.0.0 (#30): explicit per-clean latency budgets (p-budgets) — a hot-path
-// regression must fail the release, not just print a number. Conservative
-// ceilings: cold path ≤ 500us/clean; the regex-fusion work should keep us far
-// below that on any CI runner.
-ok(ms1 * 1000 / N1 < 500, "cold-clean p-budget: " + (ms1 * 1000 / N1).toFixed(1) + "us/clean < 500us");
+const MUST_NOT_CHANGE = [
+    // OAuth / login flows (mangling = login breakage)
+    "https://accounts.google.com/o/oauth2/v2/auth?client_id=abc123.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fapp.example%2Fcallback&response_type=code&scope=openid%20email&state=xyz789&nonce=n-0S6_WzA2Mj",
+    "https://github.com/login/oauth/authorize?client_id=deadbeef01&redirect_uri=https%3A%2F%2Fci.example%2Fauth&state=af0ifjsldkj",
+    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=11112222&response_type=code&redirect_uri=https%3A%2F%2Fportal.example%2Fsignin-oidc&scope=User.Read&state=OpenIdConnect",
+    // Shared search links (the query IS the content)
+    "https://www.google.com/search?q=cats+and+dogs",
+    "https://www.bing.com/search?q=age+of+empires&setlang=en",
+    "https://duckduckgo.com/?q=privacy+tools&ia=web",
+    "https://search.walla.co.il/?q=%D7%97%D7%96%D7%A8%D7%94",
+    "https://www.perplexity.ai/search?q=quantum+computing",
+    "https://yandex.com/search/?text=privacy",
+    "https://www.baidu.com/s?wd=%E9%9A%90%E7%A7%81",
+    // Article URLs containing precision-trigger words
+    "https://news.example.com/world/mayor-rejects-budget-2026",
+    "https://blog.example.org/decline-of-the-roman-empire",
+    "https://example.com/docs/refund-policy",
+    // Functional anchors & fragments
+    "https://docs.example.com/guide#section-2",
+    "https://app.example.com/#/settings/profile",
+    // E-commerce functional params
+    "https://www.amazon.com/dp/B08N5WRWNW?th=1&psc=1",
+    "https://example-shop.com/product?id=42&color=blue&size=M",
+    // Media timestamps / deep links
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
+    "https://example.com/video?t=120",
+    // Email / tel links are not anchors to clean
+    "https://webmail.example.com/compose?to=a@b.example&subject=Hello%20there",
+    // API calls with tokens (stripping = auth failure)
+    "https://api.github.com/user?access_token=gho_example16charsxx",
+    "https://graph.example.com/v2/me?fields=id,name&session_id=s3ss10n"
+];
+
+let changed = 0;
+MUST_NOT_CHANGE.forEach((u, i) => {
+    const a = makeClickable(u);
+    fire("click", clickEvent(a), true);
+    if (a.href !== u) {
+        changed++;
+        console.log("   ... altered #" + i + ":\n       in : " + u + "\n       out: " + a.href);
+    }
+});
+ok(changed === 0, "precision budget: " + MUST_NOT_CHANGE.length + " functional URLs — " + changed + " altered (must be 0)");
 
 // ---------------------------------------------------------------------------
-// Benchmark 2: 30,000 repeat lookups on the same links (LRU hits)
+// MUST-CLEAN corpus: sanity that the engine still strips real trackers (the
+// budget must not become an excuse to stop cleaning).
 // ---------------------------------------------------------------------------
-const N2 = 30000;
-t0 = process.hrtime.bigint();
-for (let i = 0; i < N2; i++) fire("click", clickEvent(anchors[i % N1]), true);
-const ms2 = Number(process.hrtime.bigint() - t0) / 1e6;
-console.log("  INFO  " + N2 + " repeat cleans (LRU hit): " + ms2.toFixed(1) + "ms => " + (ms2 * 1000 / N2).toFixed(2) + "us/clean");
-ok(ms2 < 5000, "repeat-clean throughput under budget (" + ms2.toFixed(0) + "ms < 5000ms)");
-ok(ms2 * 1000 / N2 < 100, "repeat-clean p-budget: " + (ms2 * 1000 / N2).toFixed(2) + "us/clean < 100us");
+const MUST_CLEAN = [
+    [ "https://example.com/article?utm_source=newsletter&id=7", "https://example.com/article?id=7" ],
+    [ "https://example.com/x?fbclid=IwAR0abc&page=2", "https://example.com/x?page=2" ],
+    [ "https://example.com/y?gclid=EAIaIQob&utm_medium=cpc", "https://example.com/y" ],
+    [ "https://example.com/app#section=2&utm_source=social", "https://example.com/app#section=2" ]
+];
+let cleanFails = 0;
+MUST_CLEAN.forEach(pair => {
+    const a = makeClickable(pair[0]);
+    fire("click", clickEvent(a), true);
+    if (a.href !== pair[1]) {
+        cleanFails++;
+        console.log("   ... clean fail:\n       in : " + pair[0] + "\n       got: " + a.href + "\n       want: " + pair[1]);
+    }
+});
+ok(cleanFails === 0, "must-clean: " + MUST_CLEAN.length + " tracker URLs cleaned (incl. SPA hash params)");
 
 console.log("\n== Summary ==");
 if (failures.length) { console.log(failures.length + " failure(s)"); process.exit(1); }
-console.log("All performance checks passed");
+console.log("Precision budget passed");
 process.exit(0);

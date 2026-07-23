@@ -1,12 +1,25 @@
 # NullTrail — Universal Tracking & Redirect Scrubber
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.6.0-teal.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.0.0-teal.svg)]()
 [![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)]()
 
 **NullTrail** is an autonomous, high-performance browser privacy engine designed to make your web surfing clean, fast, and secure. 
 
 It runs silently in the background, sanitizing hyperlinks, bypassing intermediate redirection pages, blocking analytical trackers, and auto-declining cookie consent banners—without slowing down your computer or breaking website layouts.
+
+---
+
+## 🆕 What's New in 3.0
+
+**All 30 roadmap innovations landed.** Highlights:
+
+* **🎯 Confidence-tiered cleaning** — every parameter is classified known-tracker / known-functional / unknown, and unknowns are **never** stripped. See exactly what was touched — and why — in the new **Activity tab**.
+* **🛡️ Rules you can trust** — feed **quorum** (2-of-3 hash servers must agree), a **72h staged rollout** for new rulesets, a **boot-time self-test** with automatic recovery to previous-good/built-in rules, and **one-click rollback**. A corrupt update can never reach you.
+* **🌐 Multilingual consent rejection** — precision-scored classifier understanding 12 languages, buttons-only, accept-wording veto.
+* **🧭 Wider coverage** — JavaScript-driven navigations (`location.assign`), SPA hash-fragment trackers, open shadow DOMs, and (opt-in) same-origin frames are all inside the net now.
+* **🧑‍🤝‍🧑 You're in control** — per-site **dry-run mode**, **timed pause with auto-resume**, per-site overrides, **personas** (Gentle/Balanced/Paranoid), offline settings **import/export**, and **Alt+Shift+C** to copy a clean page URL.
+* **⚡ Faster under the hood** — regex-fusion cut cold-path cleaning ~35%; viewport-first cleaning prioritizes links you can actually click; CI enforces **latency budgets** and a **precision corpus** (22 functional URL patterns — logins, shared searches, product variants — that must pass through byte-identical).
 
 ---
 
@@ -57,6 +70,7 @@ Take control of your privacy with simple keyboard shortcuts anywhere on the web:
 
 * **`Alt + Shift + D`**: Open or close the interactive **NullTrail Dashboard** to adjust settings (or press **`Esc`** to close it). The dashboard is fully keyboard- and screen-reader-friendly: it's a real labelled dialog that grabs focus on open and hands it back to exactly where you were on close.
 * **`Alt + Shift + N`**: Quick-toggle protection state (Enable/Disable) on the current website — takes effect instantly, across content and network protection layers.
+* **`Alt + Shift + C`**: Copy a fully cleaned, tracker-free URL of the current page to your clipboard.
 * *Shortcuts never fire while you're typing in a text field — they'll never interrupt your flow.*
 
 ---

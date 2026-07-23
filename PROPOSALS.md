@@ -1,5 +1,9 @@
 # NullTrail — 30 Innovation Proposals (v2.7.0+ design space)
 
+> **STATUS (v3.0.0, 2026-07-23): ALL 30 MERGED.** Each section header is
+> annotated with the shipped status; verification details live in
+> [AUDIT.md](AUDIT.md) Round 4 and [CHANGELOG.md](CHANGELOG.md) [3.0.0].
+
 Thirty distinct, non-overlapping ways to advance the codebase, each mapped to
 real modules and graded for false-positive (FP) risk, respecting the project's
 prime directive: **one broken website is worse than ten missed trackers.**

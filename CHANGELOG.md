@@ -2,6 +2,97 @@
 
 All notable changes to NullTrail are documented in this file.
 
+## [3.0.0] — 2026-07-23
+
+**Theme: PROPOSALS.md merged** — all 30 innovation proposals implemented in one
+consolidated major release, every one precision-gated. Design rationale per
+feature lives in [PROPOSALS.md](PROPOSALS.md); the audit ledger is in
+[AUDIT.md](AUDIT.md) (Round 4).
+
+### New — protection engine
+- **Confidence-tiered classification (#1)**: every query parameter is now
+  classified as known-tracker (stripped), known-functional (kept), or unknown
+  (kept, counted). Unknowns are never stripped — formalizing "one broken
+  website is worse than ten missed trackers". Counts surface in the new
+  Activity tab.
+- **Regex-fusion compiler (#2)**: provider parameter rules are compiled into
+  chunked alternation regexes with per-chunk fallback — cold sanitize dropped
+  ~35% in the perf canary (90µs → 58µs).
+- **Boot-time rules canary (#3)**: invariant fixtures verify every loaded
+  ruleset (cached, downloaded, rolled back) — a corrupt ruleset self-heals to
+  previous-good or built-in safe rules, and the Rules tab shows exactly what
+  happened.
+- **Staged rule rollout (#4)**: downloaded rulesets soak 72h before activation
+  (dashboard countdown + "activate now"), so a bad upstream push can't break
+  your browsing instantly. Toggleable via "Soak new rules 72h".
+- **Rule-feed quorum (#5)**: 2-of-3 independent hash feeds must agree before
+  any ruleset is accepted — single-feed compromise or stale mirrors are dead
+  ends.
+- **One-click ruleset rollback (#6)** with a stored previous-good database.
+- **JS-navigation unwrap (#7)**: `location.assign`/`location.replace` (and the
+  `location.href` setter where the engine allows it) now unwrap redirect
+  wrappers too — pages can no longer route around the cleaner with scripts.
+- **SPA hash-fragment stripping (#8)**: the quick pass now cleans trackers from
+  `#...` fragments (`#/view?utm_source=…`) — a confirmed coverage gap.
+- **Tracker-respawn watcher (#9)**: sites re-creating purged tracker storage
+  are counted (Stats tab); optional strict mode drops the writes at the source
+  (main-world `localStorage.setItem` + `document.cookie` hooks).
+- **Multilingual scored consent classifier (#10)**: reject-wording detection in
+  12 languages with a strict score threshold, accept-wording veto, buttons-only
+  targeting (links are never auto-clicked).
+
+### New — coverage
+- **Same-origin iframe cleaning, opt-in (#11)**: driven from the top document —
+  no script injection into ad frames; cross-origin stays untouched.
+- **Open shadow-DOM cleaning (#12)**: a camouflaged `attachShadow` hook
+  registers open roots for observation; closed roots remain a hard boundary.
+- **Metered prefetch neutralizer (#13)**: on metered connections, strips
+  prefetch/prerender/preconnect hints pointing at ad/logger domains only.
+- **Tracker-candidate discovery (#14)**: high-entropy unknown parameters are
+  suggested in the Activity tab; promote them to personal strip rules that
+  apply on every site and survive feed updates. Never auto-stripped.
+- **AMP→canonical redirect, per-site opt-in (#15)**.
+
+### New — transparency & UX
+- **Activity tab — "why was this touched?" (#16)**: in-memory ring buffer of
+  the last ~60 actions with the exact rule that fired (never persisted, never
+  uploaded).
+- **Per-site dry-run mode (#17)**: classify & count, rewrite nothing.
+- **Timed pause with auto-resume (#18)**: "Pause 1 hour" / "Pause this session"
+  — protection can never be silently off forever.
+- **Per-site feature overrides (#19)**: Inherit/Force-on/Force-off for hover
+  resolution, SERP stripping and privacy presets.
+- **Alt+Shift+C (#20)**: copy a fully cleaned URL of the current page.
+- **Ruleset diff viewer (#21)**: what the last database update actually changed.
+- **Personas (#22)**: Gentle / Balanced / Paranoid one-click presets.
+- **Offline import/export (#23)**: validated JSON backup of all settings (files
+  only, zero network).
+- **Stats upgrades (#24/#25/#9)**: 30-day inline-SVG sparkline with 90-day
+  auto-pruning, tracker-write counter, dark-pattern banner counter
+  (report-only).
+
+### New — engineering & release ops
+- **Precision-budget CI (#26)**: 22 functional URL patterns (OAuth flows,
+  shared searches, variant links…) must pass through the sanitizer
+  byte-identical — build fails on any diff. **It immediately caught a real
+  upstream false positive**: ClearURLs strips Amazon `th`/`psc`, which encode
+  the chosen product variant. New durable precision-override mechanism filters
+  known-bad upstream rules at compile time, surviving every feed update.
+- **Nightly E2E scaffold (#27)**: Playwright + real Chromium on recorded
+  fixtures, continue-on-error while it matures into a release gate.
+- **BFCache resurrection handling (#28)**: pageshow/persisted re-syncs config,
+  re-arms one-shot navigation latches, re-scans, flushes stats.
+- **Viewport-first cleaning (#29)**: IntersectionObserver ranks links —
+  visible ones clean first, background drains guarantee completion; deep
+  queues shed the expensive dataset scrub.
+- **Engine health (#30)**: debug-gated perf counters in About + hard latency
+  p-budgets in the CI perf canary (cold ≤ 500µs, repeat ≤ 100µs per clean).
+
+### Compatibility
+- 14 new storage keys (schema v3, defaults-safe for existing installs); factory
+  reset covers everything; no external requests added beyond update-time
+  quorum hashes; zero speculative-traffic guarantee intact.
+
 ## [2.6.0] — 2026-07-23
 
 **Theme: third 10-pass audit round** — fresh themes per pass (update-checker

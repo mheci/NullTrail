@@ -34,6 +34,7 @@ jobs:
             NT_CASE=$c node tests/smoke-engines.js
           done
           node tests/perf-check.js
+          node tests/precision-corpus.js
           echo "✓ Core regression tests passed!"
 
       - name: Run Regression Harness (network friendliness)

@@ -113,6 +113,9 @@ const locationStub = {
 
 // localStorage fallback path (no GM_* present on purpose)
 const _store = new Map();
+// v3.0.0 Test 11 fixture: a user-promoted personal strip rule rides along as
+// a synthetic provider merged into every ruleset.
+_store.set("nt_userStripRules", JSON.stringify([ "trkme" ]));
 global.localStorage = {
     getItem: k => (_store.has(k) ? _store.get(k) : null),
     setItem: (k, v) => { _store.set(k, String(v)); },
@@ -366,6 +369,20 @@ async function main() {
     a10c.href = ddgReal;
     ok(a10c._hrefStore === "https://target.example/ok",
         "main-world setter: genuine duckduckgo.com still unwrapped (got: " + a10c._hrefStore + ")");
+
+    // -----------------------------------------------------------------------
+    // Test 11 (v3.0.0): user-promoted personal strip rules are honored, and
+    // SPA hash-fragment trackers are stripped by the quick pass (#8).
+    // -----------------------------------------------------------------------
+    console.log("\n== Test 11: personal rules + hash-fragment strip ==");
+    const a12 = makeClickable("https://example.com/deal?trkme=abc123&id=5");
+    fire("click", clickEvent(a12), true);
+    ok(a12.href === "https://example.com/deal?id=5",
+        "user personal rule 'trkme' stripped, id kept (got: " + a12.href + ")");
+    const a13 = makeClickable("https://example.com/app#view=grid&utm_source=social");
+    fire("click", clickEvent(a13), true);
+    ok(a13.href === "https://example.com/app#view=grid",
+        "hash-fragment utm stripped, view kept (got: " + a13.href + ")");
 
     console.log("\n== Summary ==");
     if (failures.length) {

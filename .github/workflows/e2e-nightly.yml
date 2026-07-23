@@ -1,0 +1,31 @@
+# Nightly E2E lane (v3.0.0, proposal #27) — real-browser validation on
+# recorded pages. Intentionally scheduled + continue-on-error while it matures:
+# it must never spam PR noise, but its results are published for review.
+name: E2E Nightly (recorded pages)
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright + Chromium
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm i -D @playwright/test@latest >/dev/null 2>&1
+          npx playwright install --with-deps chromium
+
+      - name: Run recorded-page E2E
+        run: npx playwright test tests/e2e --reporter=line

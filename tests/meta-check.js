@@ -45,6 +45,15 @@ ok(script.indexOf("recordRuleResult") !== -1 && script.indexOf("rulesLastResult"
 ok(!/return decodeURIComponent\(m\[1\]\)/.test(script), "no unguarded decodeURIComponent on the sanitize hot path");
 ok(!/if \(!u \|\| !\/duckduckgo\\\.com\$\//.test(script), "unwrapDDG host pattern has a domain boundary");
 
+// v3.0.0 guards (proposal-merge release)
+ok(script.indexOf("rulesCanary") !== -1 && script.indexOf("applyRulesVerified") !== -1, "boot canary self-test present (#3)");
+ok(script.indexOf("hashQuorum") !== -1, "rule-feed quorum acceptance present (#5)");
+ok(script.indexOf("maybeActivatePending") !== -1 && script.indexOf("rulesPending") !== -1, "staged rule rollout present (#4)");
+ok(script.indexOf("PRECISION_RULE_OVERRIDES") !== -1, "precision rule overrides present (amazon th/psc)");
+ok(script.indexOf("consentClassifierPass") !== -1, "multilingual consent classifier present (#10)");
+ok(script.indexOf("IntersectionObserver") !== -1 && script.indexOf("drainIOPending") !== -1, "viewport-first cleaning present (#29)");
+ok(script.indexOf("nt:bfcache") !== -1, "BFCache resurrection hook present (#28)");
+
 console.log("\n== Summary ==");
 if (failures.length) { console.log(failures.length + " failure(s)"); process.exit(1); }
 console.log("All metadata checks passed");
