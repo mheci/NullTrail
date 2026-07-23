@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NullTrail — Universal Tracking & Redirect Scrubber
 // @namespace    https://github.com/nulltrail
-// @version      2.4.0
+// @version      2.5.0
 // @description  Fix the web.
 // @license      Unlicense
 // @supportURL   https://github.com/mheci/NullTrail/issues
@@ -1182,18 +1182,29 @@
     };
 
     let _statFlush = null;
+    // Pending deltas not yet merged into persistent storage.
+    let _deltaCleaned = 0, _deltaFields = 0, _deltaBlocked = 0;
     function bumpStats(fieldsRemoved, blocked) {
         if (!CFG.statistics) return;
         STATS.cleaned++;
         STATS.fields += fieldsRemoved || 0;
         STATS.blocked += blocked ? 1 : 0;
+        _deltaCleaned++;
+        _deltaFields += fieldsRemoved || 0;
+        _deltaBlocked += blocked ? 1 : 0;
         if (_statFlush) return;
         _statFlush = setTimeout(function() {
             _statFlush = null;
-            SV("statCleaned", STATS.cleaned);
-            SV("statFields", STATS.fields);
-            SV("statBlocked", STATS.blocked);
-        }, 4000);
+            // Bug Fix (v2.5.0): merge deltas into storage instead of writing
+            // absolute counters — two tabs used to overwrite each other's counts
+            // (last writer wins). Also shortened 4s→1.5s flush so less data is
+            // lost when a tab closes right after a burst of cleaning.
+            const dc = _deltaCleaned, df = _deltaFields, db = _deltaBlocked;
+            _deltaCleaned = _deltaFields = _deltaBlocked = 0;
+            SV("statCleaned", (GV("statCleaned", 0) | 0) + dc);
+            SV("statFields", (GV("statFields", 0) | 0) + df);
+            SV("statBlocked", (GV("statBlocked", 0) | 0) + db);
+        }, 1500);
     }
 
     function log(...args) {
@@ -1455,7 +1466,9 @@
     }
 
     function activeRuleRes(p) {
-        return CFG.referralMarketing ? p.ruleRes : p.ruleRes.concat(p.referralRes);
+        // Perf (v2.5.0): memoize the concatenated list — it was reallocated on
+        // every cleaned URL whenever referral stripping was enabled by the user.
+        return CFG.referralMarketing ? p.ruleRes : (p._allRes || (p._allRes = p.ruleRes.concat(p.referralRes)));
     }
 
     function removeFields(p, url) {
@@ -2267,11 +2280,24 @@
 
     const GA_COOKIE_RE = /^(_ga|_gid|_gat|_gcl_|_gac_|__utm[a-z]|_gali)/;
 
+    // Hardening (v2.5.0): build domain candidates by walking UP the hostname so
+    // parent-domain cookies (e.g. set on ".example.com" while visiting
+    // "sub.example.com") are expired too. The browser simply rejects public
+    // suffixes (e.g. "co.uk"), so the walk is safe without a suffix list.
+    function cookieDomainVariants() {
+        const variants = [ "" ];
+        const parts = location.hostname.split(".");
+        for (let i = 0; i <= parts.length - 2; i++) {
+            variants.push(parts.slice(i).join("."));
+        }
+        return variants;
+    }
+
     function purgeGACookies() {
         if (!CFG.purgeGACookies) return;
         try {
             const cookies = document.cookie.split(";");
-            const paths = [ "/", "" ], hosts = [ location.hostname, "." + location.hostname, "" ];
+            const paths = [ "/", "" ], hosts = cookieDomainVariants();
             for (let i = 0; i < cookies.length; i++) {
                 const name = (cookies[i].split("=")[0] || "").trim();
                 if (name && GA_COOKIE_RE.test(name)) {
@@ -2403,31 +2429,83 @@
                 d.setTime(d.getTime() + days * 86400000);
                 exp = ";expires=" + d.toUTCString();
             }
-            const parts = [ name + "=" + val + exp, "path=/", "SameSite=Lax" ];
+            // Hardening (v2.5.0): mark cookies Secure on secure origins.
+            const sec = location.protocol === "https:" ? ";Secure" : "";
+            const parts = [ name + "=" + val + exp, "path=/", "SameSite=Lax" + sec ];
             document.cookie = parts.join(";");
             const h = location.hostname;
-            document.cookie = name + "=" + val + exp + ";path=/;domain=." + h + ";SameSite=Lax";
-            document.cookie = name + "=" + val + exp + ";path=/;domain=" + h + ";SameSite=Lax";
+            document.cookie = name + "=" + val + exp + ";path=/;domain=." + h + ";SameSite=Lax" + sec;
+            document.cookie = name + "=" + val + exp + ";path=/;domain=" + h + ";SameSite=Lax" + sec;
         } catch (e) {}
     }
 
-    const CONSENT_SELECTORS = [ "[id*=consent] button[id*=reject i], [id*=consent] button[id*=decline i], [id*=consent] button[id*=refuse i]", "[id*=consent] button[class*=reject i], [id*=consent] button[class*=decline i]", "[class*=consent] button[class*=reject i], [class*=consent] button[class*=decline i]", "[class*=cookie] button[class*=reject i], [class*=cookie] button[class*=decline i]", "button#onetrust-reject-all-handler", "button[data-cy=reject-cookies], button[aria-label*=reject i]", "a[href*=reject i], button[class*=opt-out i]", ".sp_choice_type_REJECT_ALL, .sp_choice_type_REJECT", "[data-testid=reject-cookies], [data-testid=cookie-policy-decline]", "button.fc-button[aria-label*=consent i]:not(.fc-cta-consent)", ".cmp-reject, .cookie-reject, #cookie-notice-reject", ".osano-cm-denyAll, .cm-btn-accept-all + button" ];
-    
+    // Consent selectors, split by trust level (v2.5.0):
+    //  - "trusted": already scoped to consent/cookie containers or precise CMP ids.
+    //  - "generic": broad patterns that CAN hit ordinary page elements — notably
+    //    `a[href*=reject]`, which also matches article URLs like
+    //    "/news/mayor-rejects-budget". Clicking those navigated the user away —
+    //    a false positive worse than any tracker.
+    const CONSENT_SELECTORS = [
+        { s: "[id*=consent] button[id*=reject i], [id*=consent] button[id*=decline i], [id*=consent] button[id*=refuse i]", generic: false },
+        { s: "[id*=consent] button[class*=reject i], [id*=consent] button[class*=decline i]", generic: false },
+        { s: "[class*=consent] button[class*=reject i], [class*=consent] button[class*=decline i]", generic: false },
+        { s: "[class*=cookie] button[class*=reject i], [class*=cookie] button[class*=decline i]", generic: false },
+        { s: "button#onetrust-reject-all-handler", generic: false },
+        { s: "button[data-cy=reject-cookies], button[aria-label*=reject i]", generic: false },
+        { s: "a[href*=reject i], button[class*=opt-out i]", generic: true },
+        { s: ".sp_choice_type_REJECT_ALL, .sp_choice_type_REJECT", generic: false },
+        { s: "[data-testid=reject-cookies], [data-testid=cookie-policy-decline]", generic: false },
+        { s: "button.fc-button[aria-label*=consent i]:not(.fc-cta-consent)", generic: false },
+        { s: ".cmp-reject, .cookie-reject, #cookie-notice-reject", generic: false },
+        { s: ".osano-cm-denyAll, .cm-btn-accept-all + button", generic: false }
+    ];
+
+    const CONSENT_SCOPE_RE = /(consent|cookie|gdpr|privacy|cmp|banner|notice)/i;
+    const CONSENT_WORD_RE = /(reject|decline|refuse|opt[-\s]?out|deny|necessary only|essentials? only)/i;
+
+    // For generic matches: require (1) a consent-ish ancestor within 6 levels and
+    // (2) reject-style wording in the element's own accessible text. Either alone
+    // can false-positive ("privacy" footer links, /reject/ article URLs); both
+    // together are decisive.
+    function looksLikeConsentChoice(el) {
+        try {
+            let node = el;
+            for (let depth = 0; node && depth < 6 && node !== document.documentElement; depth++) {
+                const sig = (node.id || "") + " " + (typeof node.className === "string" ? node.className : "") + " " + (node.getAttribute ? (node.getAttribute("role") || "") : "");
+                if (CONSENT_SCOPE_RE.test(sig)) return true;
+                node = node.parentElement;
+            }
+        } catch (e) {}
+        return false;
+    }
+    function consentChoiceReads(el) {
+        try {
+            const t = (el.textContent || "") + " " + (el.getAttribute && el.getAttribute("aria-label") || "") + " " + (el.value || "");
+            return CONSENT_WORD_RE.test(t);
+        } catch (e) {
+            return false;
+        }
+    }
+
     // Bug Fix: Use WeakSet to allow auto-reject to run dynamically on re-rendered or multi-step banners
     let _clickedConsents = new WeakSet();
     function autoRejectConsent() {
         try {
             for (let i = 0; i < CONSENT_SELECTORS.length; i++) {
-                const els = document.querySelectorAll(CONSENT_SELECTORS[i]);
+                const rule = CONSENT_SELECTORS[i];
+                const els = document.querySelectorAll(rule.s);
                 for (let j = 0; j < els.length; j++) {
                     const el = els[j];
-                    if (!_clickedConsents.has(el) && (el.offsetParent !== null || el.getClientRects().length > 0)) {
-                        _clickedConsents.add(el);
-                        try {
-                            el.click();
-                            log("auto-rejected consent banner element:", el);
-                        } catch (e) {}
-                    }
+                    if (_clickedConsents.has(el)) continue;
+                    if (el.disabled) continue;
+                    if (!(el.offsetParent !== null || el.getClientRects().length > 0)) continue;
+                    // Precision gate (v2.5.0) for generic patterns
+                    if (rule.generic && !(looksLikeConsentChoice(el) && consentChoiceReads(el))) continue;
+                    _clickedConsents.add(el);
+                    try {
+                        el.click();
+                        log("auto-rejected consent banner element:", el);
+                    } catch (e) {}
                 }
             }
         } catch (e) {}
@@ -2909,7 +2987,9 @@
                     const dest = decodeAdflyYsmm(r);
                     if (dest && /^https?:\/\//i.test(dest)) navigateMW(dest);
                 },
-                get: () => "undefined"
+                // Bug Fix (v2.5.0): returned the STRING "undefined" — adfly-style
+                // anti-adblock checks (`typeof ysmm`) saw "string", exposing us.
+                get: () => undefined
             });
         } catch (e) {}
 
@@ -3066,6 +3146,12 @@
                             Object.defineProperties(self, {
                                 readyState: { configurable: true, get: () => 4 },
                                 status: { configurable: true, get: () => 204 },
+                                // Hardening (v2.5.0): complete the response surface —
+                                // statusText/responseURL readers previously saw native
+                                // defaults from an unsent request ("", 0, etc), which
+                                // code paths keying on them could mis-handle.
+                                statusText: { configurable: true, get: () => "No Content" },
+                                responseURL: { configurable: true, get: () => "" },
                                 responseText: { configurable: true, get: () => "" },
                                 response: { configurable: true, get: () => "" }
                             });
@@ -4034,7 +4120,7 @@
         const hdr = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06)");
         const hdrLeft = ntEl("div", null, "display:flex;flex-direction:column");
         hdrLeft.appendChild(ntEl("span", "NullTrail", "font-size:17px;font-weight:700;color:#14b8a6"));
-        hdrLeft.appendChild(ntEl("span", "v2.4.0", "font-size:11px;color:#6b7280;margin-top:2px"));
+        hdrLeft.appendChild(ntEl("span", "v2.5.0", "font-size:11px;color:#6b7280;margin-top:2px"));
         hdr.appendChild(hdrLeft);
         const closeBtn = ntEl("button", "x", "background:none;border:none;color:#9ca3af;font-size:22px;cursor:pointer;padding:0 4px;line-height:1");
         closeBtn.title = "Close";
@@ -4209,6 +4295,8 @@
             const resetBtn = ntEl("button", "Reset statistics", "margin-top:14px;padding:8px 16px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#ef4444;font-size:12px;cursor:pointer");
             resetBtn.addEventListener("click", function() {
                 STATS.cleaned = STATS.fields = STATS.blocked = 0;
+                // Keep pending deltas from resurrecting pre-reset counts (v2.5.0).
+                _deltaCleaned = _deltaFields = _deltaBlocked = 0;
                 SV("statCleaned", 0);
                 SV("statFields", 0);
                 SV("statBlocked", 0);
@@ -4256,7 +4344,7 @@
         }
 
         function renderAbout() {
-            content.appendChild(ntEl("div", "NullTrail v2.4.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "NullTrail v2.5.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
             content.appendChild(ntEl("div", "An autonomous, zero-jargon browser privacy engine fusing advanced hyperlink scrubbing, tracking parameter deletion, fast-forward redirect unwrapping, and strict analytical API shielding.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:14px"));
             const features = [ 
                 "40+ Search Engine Redirect unwrapping & sanitization", 
@@ -4299,7 +4387,18 @@
         (document.body || document.documentElement).appendChild(container);
     }
 
+    // UX safety (v2.5.0): never hijack shortcuts while the user is typing.
+    function isEditableTarget(t) {
+        while (t && t !== document.documentElement) {
+            if (t.isContentEditable) return true;
+            if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") return true;
+            t = t.parentElement;
+        }
+        return false;
+    }
+
     document.addEventListener("keydown", function(e) {
+        if (isEditableTarget(e.target)) return;
         if (e.altKey && e.shiftKey && (e.key === "N" || e.key === "n" || e.code === "KeyN")) {
             e.preventDefault();
             e.stopPropagation();
@@ -4428,5 +4527,5 @@
     setTimeout(function() { updateRules(false); }, 3000);
     setInterval(function() { updateRules(false); }, 6 * 3600 * 1000);
 
-    log("NullTrail v2.4.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
+    log("NullTrail v2.5.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
 })();

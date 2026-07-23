@@ -1,10 +1,82 @@
-# NullTrail Audit Ledger — v2.4.0 (10-pass hunt)
+# NullTrail Audit Ledger
 
-Ten themed passes over the full codebase. Each pass lists findings and their
-resolution: **FIXED**, **REVIEWED–NO CHANGE** (analyzed, change not justified
-under the false-positive-first philosophy), or **HARDENED**.
+## Round 2 — v2.5.0 (10-pass hunt)
+
+Second full iteration over the codebase with fresh themes per pass.
+
+### Pass 1 — Regex correctness sweep
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | Automated ReDoS sweep of the heaviest patterns (IP_LOGGERS, GA, TRACKER_STORAGE, BOUNCE_TRACKERS, Yahoo RU lookahead, base64 redirect probe, consent/scope regexes) against 2–4KB adversarial strings | **VERIFIED OK** — worst 50-iteration batch: 0.37ms; no catastrophic backtracking, all literals parse (`node --check`) |
+
+### Pass 2 — Listener / timer / collection leak audit
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | Every `WeakMap`/`WeakSet` collection (PROCESSED, QUEUED, LOCK, RESOLVED_MAP, XHR blockMap, camouflageMap, consents) | **VERIFIED OK** — entries die with their elements |
+| F2 | Strong collections bounded: `_lruCache` 384, `_clickedAdURLs` ≤ 5, engine cache per host | **VERIFIED OK** |
+| F3 | `gt` self-clears after 30 ticks; `whenReady` capped at 5s; `mdh` re-registrations are platform-deduped (same fn reference + `once`) | **VERIFIED OK** |
+| F4 | Dashboard `Esc` listener self-removes when container disconnects | **VERIFIED OK** |
+
+### Pass 3 — Rules pipeline round 2
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | `activeRuleRes` reallocated the concatenated referral rule array on **every** cleaned URL when referral stripping was on | **FIXED** — memoized per provider (`p._allRes`) |
+| F2 | Delete-during-`forEach` in `stripQuickUTM` | **VERIFIED OK** — `URLSearchParams.forEach` iterates a live but safely-defined sequence per spec |
+| F3 | `rawRules` with `g` flag reused across replaces | **VERIFIED OK** — `String.replace` resets `lastIndex` |
+
+### Pass 4 — Main-world shims round 2
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | `ysmm` getter returned the **string** `"undefined"` — adfly-style `typeof ysmm` checks saw `"string"` and could detect the shim | **FIXED** — returns real `undefined` |
+| F2 | Blocked-XHR response surface incomplete (`statusText`, `responseURL` missing) | **FIXED** — full mocked surface |
+
+### Pass 5 — Persistence correctness
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | **Cross-tab stat clobbering**: flush wrote absolute counters loaded at boot — concurrent tabs silently discarded each other's stats | **FIXED** — delta-merge at flush (read→add→write) |
+| F2 | Up to 4s of stats lost when a tab closes right after cleaning | **FIXED** — flush window 4s → 1.5s; reset also zeroes pending deltas |
+
+### Pass 6 — Dashboard/state round 2
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | Whitelist textarea ↔ per-site toggle sync | **VERIFIED OK** — both paths update the other |
+| F2 | Metered rows + toggles recomputed live per render | **VERIFIED OK** |
+
+### Pass 7 — Consent auto-reject precision (round's highest-risk find)
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | **`a[href*=reject i]` auto-clicked ANY link whose URL contains "reject"** — e.g. `/news/mayor-rejects-budget` — navigating users away mid-read. Worse than any tracker. | **FIXED** — selectors split into trusted/generic; generic matches now require BOTH a consent-scoped ancestor (6-level walk) AND reject-style wording in the element's own text. Skips disabled/hidden elements. Regression test covers the malicious fixture (article link) and the genuine decline button |
+
+### Pass 8 — Cookie operations
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | GA-cookie purge missed **parent-domain** cookies (set on `.example.com`, visited from `sub.example.com`) | **FIXED** — hostname is walked upward; browsers reject public suffixes harmlessly, no suffix list needed |
+| F2 | Preset cookies set without `Secure` on HTTPS | **FIXED** — `;Secure` appended on secure origins |
+
+### Pass 9 — UX safety
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | Alt+Shift+D/N shortcuts fired even while typing in inputs/textareas/contenteditable (and Alt+Shift is the Windows IME switch combo) | **FIXED** — shortcuts ignored when any ancestor of the target is editable |
+
+### Pass 10 — Release engineering
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | Update checker re-verified: `@updateURL`/`@downloadURL` canonical + CI-enforced; rule updater metered-gated, hash-gated, payload-validated, timed out at 20s, with 6h–24h backoff | **VERIFIED OK** |
+| F2 | Regression net grew to 23 core assertions incl. consent-precision fixtures | **FIXED** — CI unchanged, runs all suites + meta guard |
 
 ---
+
+## Round 1 — v2.4.0 (10-pass hunt)
 
 ## Pass 1 — Main-world interception hooks (fetch / XHR / beacon / WS / ES / img / href)
 
