@@ -1,5 +1,65 @@
 # NullTrail Audit Ledger
 
+## Round 4 — v3.0.0 (PROPOSALS merge: all 30 implemented)
+
+Round 4 was a consolidation round: implement **all 30** proposals from
+PROPOSALS.md, each verified against the prime directive (precision first, zero
+speculative traffic, no churn). Table = implementation & verification status.
+
+### A. Protection engine
+
+| # | Proposal | Status | Verification |
+|---|---|---|---|
+| 1 | Confidence-tiered classification | **MERGED** | `_clsFunctional`/`_clsUnknown` counters on the global provider only (no double-count); Activity tab renders; corpus test proves unknowns untouched |
+| 2 | Regex-fusion compiler | **MERGED** | chunked alternation (64) + per-chunk per-rule fallback; perf canary: 90µs → 58µs cold (−35%) |
+| 3 | Boot canary self-test | **MERGED** | 4 invariant fixtures incl. referral-allow contract; recovery chain new→prev→embedded; `rulesCanaryFail` surfaces in Rules tab |
+| 4 | Staged rule rollout | **MERGED** | `rulesPending` with 72h `activateAt`; boot + "activate now" paths share `activateRules()`; status "staged" is honest in the update contract |
+| 5 | 2-of-3 feed quorum | **MERGED** | `hashQuorum()` majority; <2 agreeing hashes ⇒ honest "failed" + backoff |
+| 6 | Ruleset rollback | **MERGED** | prev snapshot at activation; rollback re-verified by canary before going live |
+| 7 | JS-navigation unwrap | **MERGED** | `location.assign/replace` wrapped (camouflaged); `Location.href` setter best-effort ([Unforgeable] engines degrade silently); whitelist/active respected via `realLink` |
+| 8 | SPA hash-fragment strip | **MERGED** | quick pass reuses `parseHashFragments`; non-param fragments (`#!/path`) provably unmangled; smoke Test 11 |
+| 9 | Tracker-respawn watcher | **MERGED** | MW `Storage.setItem` + `Document.cookie` hooks, pattern pushed via cfg meta; strict mode opt-in (default report-only) |
+| 10 | Multilingual consent classifier | **MERGED** | 12-language wording; accept-veto; buttons-only; mandatory consent scope + reject wording (score ≥6); pre-ticked/hidden skip stands |
+
+### B. Coverage
+
+| # | Proposal | Status | Verification |
+|---|---|---|---|
+| 11 | Same-origin iframe cleaning | **MERGED (opt-in)** | top-document driven — `@noframes` kept; cross-origin `contentDocument` throws ⇒ skipped; ≤10 frames, WeakSet-observed |
+| 12 | Open shadow-root cleaning | **MERGED** | `attachShadow` hook registers OPEN roots only (dashboard's closed root unaffected); roots WeakSet-deduped, observed with shared observer |
+| 13 | Metered prefetch neutralizer | **MERGED** | metered-only; ad/logger hosts only; first-party hints untouched |
+| 14 | Entropy candidate discovery | **MERGED (suggestion-only)** | ≥16-char high-entropy values, 200-key cap; promotion adds personal provider; rebuilds rules + clears LRU on promote/remove |
+| 15 | AMP→canonical redirect | **MERGED (per-site opt-in)** | requires AMP signature + canonical link + per-host flag; one-shot per page |
+
+### C. Transparency & UX
+
+| # | Proposal | Status | Verification |
+|---|---|---|---|
+| 16 | Explainability buffer | **MERGED** | 60-entry memory ring; query strings NEVER recorded; statistics-off ⇒ zero traces |
+| 17 | Per-site dry-run | **MERGED** | rewrites skipped, activity/HUD still count; IP-logger neutralization stays active (safety) |
+| 18 | Timed pause + auto-resume | **MERGED** | `pauseUntil` persisted, `_sessionPaused` per-tab; expiry clears itself inside `isPaused()`; Sites tab shows countdown + resume |
+| 19 | Per-site overrides | **MERGED** | `eff()` wrapper; UI: inherit/on/off for 3 keys; storage schema accepts any toggle key (future-proof) |
+| 20 | Alt+Shift+C copy clean URL | **MERGED** | async Clipboard API + legacy fallback; transient HUD confirm |
+| 21 | Rules diff viewer | **MERGED** | compact summary persisted at activation; Rules tab renders providers/rules ± |
+| 22 | Personas | **MERGED** | three presets over existing toggles only (ad-noise never force-enabled) |
+| 23 | Import/export | **MERGED** | export via Blob download; import type-checked + host-key-regex filtered (`__proto__`-safe) + regex-validated personal rules |
+| 24 | Stats sparkline & hygiene | **MERGED** | daily buckets pruned >90d; Trusted-Types-safe fallback rendering |
+| 25 | Dark-pattern auditor | **MERGED (report-only)** | pre-ticked boxes / no-reject-path detection, bounded scan (40 boxes), stat-only |
+
+### D. Engineering & ops
+
+| # | Proposal | Status | Verification |
+|---|---|---|---|
+| 26 | Precision-budget CI corpus | **MERGED** | 22 must-not-change + 4 must-clean fixtures; **caught a real upstream FP (amazon `th`/`psc`)** — durable override added |
+| 27 | Nightly E2E lane | **SCAFFOLDED** | Playwright spec + nightly workflow (continue-on-error while maturing; cannot run browsers in the dev sandbox) |
+| 28 | BFCache handling | **MERGED** | pageshow/persisted → config re-push, `nt:bfcache` re-arms MW latch, SERP re-strip, stat flush |
+| 29 | Viewport-first + shedding | **MERGED** | IO unshifts visible links; bounded iterator drains (no O(n²)); deep-queue shed skips dataset scrub |
+| 30 | Perf health + p-budgets | **MERGED** | debug counters in About; CI p-budgets: cold ≤500µs, repeat ≤100µs per clean |
+
+**Regression matrix (15 processes)**: smoke (30 assertions), 5 engine cases +
+whitelist mode, 3 network modes, perf canary w/ budgets, precision corpus,
+meta-check — all green. `node --check` clean.
+
 ## Round 3 — v2.6.0 (10-pass hunt)
 
 Third full iteration over the codebase, again with fresh themes per pass

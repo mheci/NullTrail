@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NullTrail — Universal Tracking & Redirect Scrubber
 // @namespace    https://github.com/nulltrail
-// @version      2.6.0
+// @version      3.0.0
 // @description  Fix the web.
 // @license      Unlicense
 // @supportURL   https://github.com/mheci/NullTrail/issues
@@ -1075,7 +1075,21 @@
         // When true (default), all optional background traffic (scheduled rule
         // downloads, hover redirect resolution, ad-noise clicks) is paused while
         // the browser reports a metered connection or Data-Saver mode.
-        respectMetered: GV("respectMetered", true)
+        respectMetered: GV("respectMetered", true),
+        // v3.0.0 — new features (all precision-gated; see PROPOSALS.md):
+        // Deep-clean same-origin iframes from the top document. Off by default:
+        // cross-origin frames are never touched.
+        deepFrames: GV("deepFrames", false),
+        // Staged rule rollout: freshly downloaded rulesets activate after a
+        // 72h soak (or a manual "activate now"), so a bad upstream push never
+        // hits conservative users instantly.
+        stagedRules: GV("stagedRules", true),
+        // When true, tracker keys purged from web storage are IMMEDIATELY
+        // re-purged if the site re-creates them. Off by default (report-only).
+        respawnStrict: GV("respawnStrict", false),
+        // User-promoted personal strip rules (from the Candidates tab).
+        // Explicitly user-authored, so precision accountability is theirs.
+        userStripRules: GV("userStripRules", [])
     };
 
     // ------------------------------------------------------------------
@@ -1107,6 +1121,45 @@
     // the dashboard "text selection" toggle fail silently on first use.
     let unblockTextSelectionSites = GV("unblockTextSelectionSites", {});
 
+    // Storage schema v3 (v3.0.0): additive keys below. Older installs simply
+    // get defaults; factory-reset list below covers every key.
+    try { if ((GV("schemaVersion", 0) | 0) < 3) SV("schemaVersion", 3); } catch (e) {}
+
+    // v3.0.0 (#17) — per-site dry-run: classify & count, rewrite nothing.
+    let dryRunSites = GV("dryRunSites", {});
+    function isSiteDryRun() {
+        try { return !!dryRunSites[location.hostname.toLowerCase()]; } catch (e) { return false; }
+    }
+
+    // v3.0.0 (#18) — timed pause: protection auto-resumes after the deadline,
+    // so "disable for a minute" can never silently become "off forever".
+    let pauseUntil = GV("pauseUntil", 0) | 0;
+    let _sessionPaused = false; // per-tab, in-memory "pause this session"
+    function isPaused() {
+        if (_sessionPaused) return true;
+        if (pauseUntil > 0) {
+            if (Date.now() < pauseUntil) return true;
+            // expired — clear & auto-resume
+            pauseUntil = 0;
+            SV("pauseUntil", 0);
+        }
+        return false;
+    }
+
+    // v3.0.0 (#19) — per-site config overrides: {host: {cfgKey: value}}.
+    // Storage supports ANY key; the Sites tab currently exposes three.
+    let siteProfiles = GV("siteProfiles", {});
+    function eff(key) {
+        try {
+            const p = siteProfiles[location.hostname.toLowerCase()];
+            if (p && Object.prototype.hasOwnProperty.call(p, key)) return p[key];
+        } catch (e) {}
+        return CFG[key];
+    }
+
+    // v3.0.0 (#15) — per-site AMP→canonical redirect opt-in.
+    let ampCanonicalSites = GV("ampCanonicalSites", {});
+
     function isWhitelisted(host) {
         if (!host || !WHITELIST) return false;
         const lines = String(WHITELIST).split(/[\n,]+/);
@@ -1127,7 +1180,9 @@
     }
 
     function isActive() {
-        return CFG.globalStatus && !isWhitelisted(location.hostname);
+        // v3.0.0: timed/session pause is a third state beside globalStatus and
+        // whitelisting — checked here so EVERY feature path respects it.
+        return CFG.globalStatus && !isPaused() && !isWhitelisted(location.hostname);
     }
 
     function addWhitelist(host) {
@@ -1200,6 +1255,7 @@
         SV("statCleaned", (GV("statCleaned", 0) | 0) + dc);
         SV("statFields", (GV("statFields", 0) | 0) + df);
         SV("statBlocked", (GV("statBlocked", 0) | 0) + db);
+        bumpDaily(dc, db); // v3.0.0 (#24)
     }
     // Bug Fix (v2.6.0): deltas pending in the 1.5s debounce window were lost
     // when the tab closed or navigated right after a burst of cleaning — flush
@@ -1220,7 +1276,58 @@
         document.addEventListener("visibilitychange", function() {
             if (document.visibilityState === "hidden") flushStats();
         });
+        // v3.0.0 (#28) — BFCache resurrection: a bfcache-restored page keeps
+        // closures that assume a FRESH document (stale boot-time assumptions,
+        // latched one-shot flags). Re-sync everything idempotently.
+        window.addEventListener("pageshow", function(ev) {
+            if (!ev || !ev.persisted) return;
+            try {
+                pushConfigToPage();
+                window.dispatchEvent(new CustomEvent("nt:bfcache"));
+                stripSERPBar();
+                scanDom();
+                scanSpecial();
+                flushStats();
+            } catch (e) {}
+        });
     } catch (e) {}
+
+    // v3.0.0 (#16) — explainability ring buffer: the last ~60 actions, held in
+    // MEMORY ONLY (never persisted, never leaves the tab), and recorded without
+    // query strings so no sensitive URLs are retained. Feeding the dashboard's
+    // "Recent activity" tab answers "why was this touched?" instantly.
+    const ACTIVITY_MAX = 60;
+    const _activity = [];
+    function recordActivity(kind, url, rule) {
+        if (!CFG.statistics) return; // stats off = no traces at all, anywhere
+        try {
+            const u = new URL(url, location.href);
+            _activity.push({
+                t: Date.now(),
+                kind: kind,
+                text: u.hostname + u.pathname.slice(0, 96),
+                rule: rule || ""
+            });
+            while (_activity.length > ACTIVITY_MAX) _activity.shift();
+        } catch (e) {}
+    }
+
+    // v3.0.0 (#24) — daily stats buckets, local-only, auto-pruned past 90 days.
+    function bumpDaily(cleanedDelta, blockedDelta) {
+        if (!CFG.statistics) return;
+        try {
+            const day = new Date().toISOString().slice(0, 10);
+            const d = GV("statDaily", {}) || {};
+            if (!d[day]) d[day] = { c: 0, b: 0 };
+            d[day].c += cleanedDelta;
+            d[day].b += blockedDelta;
+            const cutoff = Date.now() - 90 * 86400000;
+            Object.keys(d).forEach(k => {
+                if (new Date(k + "T00:00:00Z").getTime() < cutoff) delete d[k];
+            });
+            SV("statDaily", d);
+        } catch (e) {}
+    }
 
     function log(...args) {
         if (!CFG.debug && !CFG.logging) return;
@@ -1307,7 +1414,49 @@
 
     let PROVIDERS = [];
 
+    // v3.0.0 (#2) — regex fusion: instead of testing K keys against R separate
+    // anchored regexes (K×R), compile the R sources into chunked alternations
+    // of max 64 — identical match semantics, far fewer engine invocations.
+    // Compilation failure of any chunk degrades that chunk to per-rule mode.
+    const FUSION_CHUNK = 64;
+    function fuseRules(ruleSources) {
+        const chunks = [];
+        for (let i = 0; i < ruleSources.length; i += FUSION_CHUNK) {
+            const part = ruleSources.slice(i, i + FUSION_CHUNK);
+            try {
+                chunks.push(new RegExp("^(?:" + part.join(")|(?:") + ")$", "i"));
+            } catch (e) {
+                chunks.push(null); // degraded chunk → per-rule fallback
+            }
+        }
+        return chunks;
+    }
+
+    // v3.0.0 (#1 spirit, corpus-enforced) — precision rule overrides. Upstream
+    // ClearURLs strips Amazon's `th`/`psc`, but those encode the user's CHOSEN
+    // product variant on /dp/ links: dropping them silently changes which
+    // variant loads. That's a broken website, not a tracker. The override is
+    // applied at compile time so it survives every future feed update, and the
+    // precision-budget CI corpus (tests/precision-corpus.js) guards it.
+    const PRECISION_RULE_OVERRIDES = {
+        amazon: { rules: [ "th", "psc" ], referralMarketing: [] }
+    };
+    function applyPrecisionOverrides(name, def) {
+        const ov = PRECISION_RULE_OVERRIDES[name.toLowerCase()];
+        if (!ov) return def;
+        const out = {};
+        Object.keys(def).forEach(k => {
+            out[k] = def[k];
+        });
+        if (Array.isArray(def.rules)) out.rules = def.rules.filter(r => ov.rules.indexOf(r) === -1);
+        if (Array.isArray(def.referralMarketing)) out.referralMarketing = def.referralMarketing.filter(r => (ov.referralMarketing || []).indexOf(r) === -1);
+        return out;
+    }
+
     function compileProvider(name, def) {
+        def = applyPrecisionOverrides(name, def);
+        const ruleSrcs = (def.rules || []).concat(def.completeProvider ? [ ".*" ] : []);
+        const refSrcs = def.referralMarketing || [];
         return {
             name: name,
             completeProvider: !!def.completeProvider,
@@ -1316,8 +1465,10 @@
             exceptions: (def.exceptions || []).map(r => new RegExp(r, "i")),
             rawRules: (def.rawRules || []).map(r => new RegExp(r, "gi")),
             redirections: (def.redirections || []).map(r => new RegExp(r, "i")),
-            ruleRes: (def.rules || []).concat(def.completeProvider ? [ ".*" ] : []).map(r => new RegExp("^" + r + "$", "i")),
-            referralRes: (def.referralMarketing || []).map(r => new RegExp("^" + r + "$", "i"))
+            ruleRes: ruleSrcs.map(r => new RegExp("^" + r + "$", "i")),
+            referralRes: refSrcs.map(r => new RegExp("^" + r + "$", "i")),
+            _fused: fuseRules(ruleSrcs),
+            _fusedReferral: fuseRules(refSrcs)
         };
     }
 
@@ -1332,6 +1483,25 @@
                     log("bad provider", k, e);
                 }
             });
+            // v3.0.0 (#14): user-promoted personal strip rules ride along as a
+            // synthetic provider (catch-all). Each entry was explicitly approved
+            // in the dashboard — NullTrail never strips on its own suspicion.
+            if (Array.isArray(CFG.userStripRules)) {
+                const okRules = [];
+                CFG.userStripRules.forEach(r => {
+                    try {
+                        new RegExp("^(?:" + r + ")$", "i");
+                        okRules.push(r);
+                    } catch (e) {
+                        log("invalid user rule skipped:", r);
+                    }
+                });
+                if (okRules.length) {
+                    try {
+                        arr.push(compileProvider("user (personal)", { urlPattern: ".*", rules: okRules }));
+                    } catch (e) {}
+                }
+            }
             // Bug Fix (v2.2.0): the old comparator returned -1 for every pair where
             // `a` was not the global provider — an inconsistent ordering relation that
             // made provider order engine-dependent. Weight-based comparator keeps the
@@ -1347,12 +1517,156 @@
             if (arr.length > 0) {
                 PROVIDERS = arr;
                 log("rules loaded:", arr.length, "providers");
+                return true;
             } else {
                 log("no valid providers compiled — keeping existing rules");
+                return false;
             }
         } catch (e) {
             log("setRules error", e);
+            return false;
         }
+    }
+
+    // ------------------------------------------------------------------
+    // v3.0.0 (#3/#4/#5/#6/#21) — rules pipeline: canary, staging, quorum,
+    // rollback, diff. Never let a bad/corrupt/forged ruleset reach a user.
+    // ------------------------------------------------------------------
+
+    // #3 canary: invariant fixtures the loaded ruleset MUST satisfy. These are
+    // precision contracts (strip trackers, NEVER eat functional params).
+    function rulesCanary() {
+        try {
+            const fx = [
+                [ "https://example.com/?utm_source=x&id=1", "https://example.com/?id=1" ],
+                [ "https://www.google.com/url?q=" + encodeURIComponent("https://example.org/"), "https://example.org/" ],
+                [ "https://example.com/p?utm_campaign=c#sec=2", "https://example.com/p#sec=2" ],
+                // Referral-allow contract (default ON): affiliate tag survives,
+                // tracker param goes. If the user strips referrals, both go.
+                [ "https://www.amazon.com/dp/B0000000?tag=aff-20&th=1",
+                  CFG.referralMarketing ? "https://www.amazon.com/dp/B0000000?tag=aff-20" : "https://www.amazon.com/dp/B0000000" ]
+            ];
+            for (let i = 0; i < fx.length; i++) {
+                const got = cleanPass(fx[i][0], {});
+                if (got !== fx[i][1]) {
+                    log("canary fixture failed:", fx[i][0], "→", got);
+                    return false;
+                }
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    let _canaryFailed = false;
+    // Apply a ruleset with verification + automatic recovery (#3 + #6):
+    // try new → previous-good → embedded, in that order, until the canary passes.
+    function applyRulesVerified(data, hash, source) {
+        DV("rulesCanaryFail");
+        let label = source || "unknown";
+        if (setRules(data) && rulesCanary()) {
+            _canaryFailed = false;
+            log("rules verified by canary (" + label + ")");
+            return true;
+        }
+        const prev = GV("rulesDataPrev", null);
+        if (prev && prev.data && prev.data.providers) {
+            log("canary failed on " + label + " — trying previous-good ruleset");
+            if (setRules(prev.data) && rulesCanary()) {
+                _canaryFailed = true;
+                SV("rulesCanaryFail", JSON.stringify({ at: Date.now(), source: label, recovery: "previous-good" }));
+                return false;
+            }
+        }
+        log("canary failed on prev too — falling back to embedded rules");
+        setRules(EMBEDDED_RULES);
+        _canaryFailed = true;
+        SV("rulesCanaryFail", JSON.stringify({ at: Date.now(), source: label, recovery: "embedded" }));
+        return false;
+    }
+
+    // #21 rules diff: compact summary of what a new ruleset changes.
+    function summarizeRulesDiff(prevData, nextData) {
+        try {
+            const pp = (prevData && prevData.providers) || {};
+            const np = (nextData && nextData.providers) || {};
+            const added = Object.keys(np).filter(k => !pp[k]);
+            const removed = Object.keys(pp).filter(k => !np[k]);
+            let addedRules = 0, removedRules = 0;
+            Object.keys(np).forEach(k => {
+                if (!pp[k]) return;
+                const o = new Set(pp[k].rules || []), n = new Set(np[k].rules || []);
+                n.forEach(r => { if (!o.has(r)) addedRules++; });
+                o.forEach(r => { if (!n.has(r)) removedRules++; });
+            });
+            return { at: Date.now(), addedProviders: added, removedProviders: removed, addedRules: addedRules, removedRules: removedRules };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // #4/#6 activation with staging + prev-snapshot. Returns true if the new
+    // ruleset became the live one.
+    function activateRules(data, hash, source) {
+        const current = GV("rulesData", null);
+        const currentHash = String(GV("rulesHash", ""));
+        if (current && current.providers) {
+            SV("rulesDataPrev", { data: current, hash: currentHash });
+            SV("rulesDiff", summarizeRulesDiff(current, data));
+        }
+        lruClear(); // new matchers — old sanitizer cache is stale
+        SV("rulesData", data);
+        if (hash) SV("rulesHash", hash);
+        SV("rulesUpdated", Date.now());
+        DV("rulesPending");
+        return applyRulesVerified(data, hash, source || "update");
+    }
+
+    const RULE_STAGE_MS = 72 * 3600 * 1000;
+
+    // v3.0.0 (#14): recompile the active ruleset so personal rules take effect
+    // immediately (and stale LRU entries can't bypass them).
+    function rebuildRulesWithUserRules() {
+        lruClear();
+        const d = GV("rulesData", null);
+        if (d && d.providers) setRules(d);
+        else setRules(EMBEDDED_RULES);
+    }
+
+    // Activate a staged (pending) ruleset once its soak has elapsed. Called at
+    // boot and from the dashboard's "activate now" button.
+    function maybeActivatePending(forceActivate) {
+        try {
+            const pending = GV("rulesPending", null);
+            if (!pending || !pending.data || !pending.data.providers) return "none";
+            if (!forceActivate && (!pending.activateAt || Date.now() < pending.activateAt)) return "waiting";
+            const okd = activateRules(pending.data, pending.hash || "", "staged rollout");
+            log("pending rules activated:", okd ? "verified" : "canary recovery engaged");
+            return okd ? "updated" : "failed";
+        } catch (e) {
+            return "none";
+        }
+    }
+
+    // #5 quorum: fetch all three independent hash feeds; require at least two
+    // agreeing hashes before trusting an update. Three ~100-byte files, only at
+    // update time — never speculative.
+    function hashQuorum() {
+        return Promise.all(HASH_URLS.map(u => gmFetch(u).then(r => (r.status === 200 ? (r.text || "").trim().toLowerCase() : null)).catch(() => null))).then(vals => {
+            const got = vals.filter(v => v && v.length >= 32);
+            if (got.length < 2) return null;
+            const counts = {};
+            let best = null, bestN = 0;
+            got.forEach(v => {
+                counts[v] = (counts[v] || 0) + 1;
+                if (counts[v] > bestN) {
+                    bestN = counts[v];
+                    best = v;
+                }
+            });
+            return bestN >= 2 ? best : null;
+        });
     }
 
     function isLocalURL(url) {
@@ -1486,6 +1800,51 @@
         return CFG.referralMarketing ? p.ruleRes : (p._allRes || (p._allRes = p.ruleRes.concat(p.referralRes)));
     }
 
+    // v3.0.0 (#1) — confidence-tiered classification. Unknown params are NEVER
+    // stripped by us; they are merely counted (and, if high-entropy, offered to
+    // the user as personal-rule candidates — human-in-the-loop only).
+    const FUNCTIONAL_PARAMS_RE = /^(?:q|wd|p|query|search|text|keyword|ia|iai|qft|oq|url|u|target|dest|next|to|return|callback|id|page|pageno|page_num|offset|limit|sort|order|filter|lang|locale|hl|gl|tab|view|type|format|sid|session|token|auth|code|state|nonce|client_id|redirect_uri|scope|response_type|access_token|refresh_token|kbn|node|s)$/i;
+    const ENTROPY_VALUE_RE = /^[A-Za-z0-9+/_=\-.]{16,}$/;
+    let _clsFunctional = 0, _clsUnknown = 0;
+    const CANDIDATES_MAX = 200;
+    const _candidates = Object.create(null); // param name -> sightings this page
+
+    function classifyParam(key, value) {
+        if (!CFG.statistics) return;
+        if (FUNCTIONAL_PARAMS_RE.test(key)) {
+            _clsFunctional++;
+            return;
+        }
+        _clsUnknown++;
+        // v3.0.0 (#14) candidate discovery: values that look like unique
+        // high-entropy identifiers are tracker-suspicious — suggested, never stripped.
+        if (value && value.length >= 16 && ENTROPY_VALUE_RE.test(value)) {
+            if (!(key in _candidates) && Object.keys(_candidates).length >= CANDIDATES_MAX) return;
+            _candidates[key] = (_candidates[key] || 0) + 1;
+        }
+    }
+
+    // Fused (v3.0.0 #2) rule test with per-rule fallback for degraded chunks.
+    function fusedTest(chunks, fallbackRes, key) {
+        for (let i = 0; i < chunks.length; i++) {
+            const re = chunks[i];
+            if (re) {
+                if (re.test(key)) return true;
+            } else {
+                for (let j = i * FUSION_CHUNK, e = Math.min(j + FUSION_CHUNK, fallbackRes.length); j < e; j++) {
+                    if (fallbackRes[j].test(key)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    function rulesMatch(p, key) {
+        if (CFG.referralMarketing) return fusedTest(p._fused, p.ruleRes, key);
+        // Referral stripping enabled: test both fused sets.
+        return fusedTest(p._fused, p.ruleRes, key) || fusedTest(p._fusedReferral, p.referralRes, key);
+    }
+
     function removeFields(p, url) {
         let urlObj;
         try {
@@ -1496,23 +1855,25 @@
         const fields = urlObj.searchParams;
         const fragments = parseHashFragments(urlObj);
         if (fields.toString() === "" && fragments.toString() === "") return url;
-        const res = activeRuleRes(p);
+        // Classification counters only on the catch-all provider so the same
+        // param isn't double-counted across overlapping providers.
+        const classifyHere = CFG.statistics && p.urlPattern && p.urlPattern.source === ".*";
         let removed = 0;
-        for (let i = 0; i < res.length; i++) {
-            const re = res[i];
-            const fkeys = Array.from(fields.keys());
-            for (let k = 0; k < fkeys.length; k++) {
-                if (re.test(fkeys[k])) {
-                    fields.delete(fkeys[k]);
-                    removed++;
-                }
+        const fkeys = Array.from(new Set(Array.from(fields.keys())));
+        for (let k = 0; k < fkeys.length; k++) {
+            const key = fkeys[k];
+            if (rulesMatch(p, key)) {
+                fields.delete(key);
+                removed++;
+            } else if (classifyHere) {
+                classifyParam(key, fields.get(key));
             }
-            const hkeys = fragments.keys();
-            for (let h = 0; h < hkeys.length; h++) {
-                if (re.test(hkeys[h])) {
-                    fragments.delete(hkeys[h]);
-                    removed++;
-                }
+        }
+        const hkeys = fragments.keys();
+        for (let h = 0; h < hkeys.length; h++) {
+            if (rulesMatch(p, hkeys[h])) {
+                fragments.delete(hkeys[h]);
+                removed++;
             }
         }
         if (removed === 0) return url;
@@ -1686,20 +2047,26 @@
             if (nextTry && Date.now() < nextTry) return Promise.resolve("skipped");
         }
         _updatingRules = true;
-        return firstOK(HASH_URLS).then(hr => {
-            const remoteHash = (hr.text || "").trim().toLowerCase();
+        // v3.0.0 (#5): hash feeds must reach QUORUM (2-of-3 agree) before any
+        // download is trusted — single-feed compromise can no longer push a
+        // forged ruleset.
+        return hashQuorum().then(remoteHash => {
+            if (!remoteHash) throw new Error("hash-quorum");
             // Bandwidth fix (v2.2.0): if the remote hash matches our cached rules we
             // can skip downloading the full ~200KB data file entirely.
             const cachedHash = String(GV("rulesHash", "")).toLowerCase();
-            if (remoteHash && cachedHash === remoteHash && GV("rulesData", null)) {
+            if (cachedHash === remoteHash && GV("rulesData", null)) {
                 SV("rulesUpdated", Date.now());
                 log("rules already up to date");
                 return "current";
             }
+            // Already staged with this exact hash? Nothing new to do.
+            const pending = GV("rulesPending", null);
+            if (pending && pending.hash === remoteHash) return "staged";
             return firstOK(RULE_URLS).then(dr => {
                 const dataText = (dr.text || "").trim();
                 const accept = digest => {
-                    if (remoteHash && digest && digest !== remoteHash) {
+                    if (digest && digest !== remoteHash) {
                         log("rule hash mismatch");
                         return "failed";
                     }
@@ -1715,16 +2082,24 @@
                         log("rule payload invalid");
                         return "failed";
                     }
-                    SV("rulesData", data);
-                    if (digest) SV("rulesHash", digest);
                     SV("rulesUpdated", Date.now());
-                    setRules(data);
-                    log("rules updated from feed");
-                    return "updated";
+                    // v3.0.0 (#4): staged rollout — the new ruleset soaks for
+                    // 72h before activation (dashboard offers "activate now").
+                    if (CFG.stagedRules) {
+                        SV("rulesPending", {
+                            data: data,
+                            hash: digest || remoteHash,
+                            fetchedAt: Date.now(),
+                            activateAt: Date.now() + RULE_STAGE_MS
+                        });
+                        log("rules staged — activates after 72h soak");
+                        return "staged";
+                    }
+                    log("rules fetched — activating with canary verification");
+                    return activateRules(data, digest || remoteHash, "update") ? "updated" : "failed";
                 };
-                // crypto.subtle is unavailable in insecure (http://) contexts. The
-                // hash file is served from the same trusted origin as the data, so
-                // skipping verification there changes nothing security-wise.
+                // crypto.subtle is unavailable in insecure (http://) contexts.
+                // Hash quorum (2-of-3 feeds over TLS) still anchors trust.
                 if (typeof crypto !== "undefined" && crypto.subtle && remoteHash) {
                     return sha256Hex(dataText).then(accept, () => accept(null));
                 }
@@ -2255,6 +2630,24 @@
                     changed = true;
                 }
             });
+            // v3.0.0 (#8): the quick pass previously ignored hash-fragment
+            // params — SPA routers carry trackers there (#/view?utm_=…).
+            if (u.hash && u.hash.indexOf("=") !== -1) {
+                const fr = parseHashFragments(u);
+                const hkeys = fr.keys();
+                let hChanged = false;
+                for (let i = 0; i < hkeys.length; i++) {
+                    if (STRIP_PARAMS_RE.test(hkeys[i]) || /utm_/i.test(hkeys[i])) {
+                        fr.delete(hkeys[i]);
+                        hChanged = true;
+                    }
+                }
+                if (hChanged) {
+                    const hs = fr.toString();
+                    u.hash = hs ? "#" + hs : "";
+                    changed = true;
+                }
+            }
             return changed ? u.toString() : href;
         } catch (e) {
             return href;
@@ -2277,13 +2670,31 @@
         return s;
     }
 
+    // v3.0.0 (#30) — debug-gated perf counters for the About tab "engine health".
+    const _perf = { cold: { n: 0, total: 0, max: 0 }, hit: { n: 0, total: 0 } };
+
     function sanitizeHref(href) {
         if (!href) return href;
         const key = String(href);
         if (key.length > 2048) return sanitizeHrefRaw(href);
         const c = lruGet(key);
-        if (c.hit) return c.val;
-        const res = sanitizeHrefRaw(href);
+        if (c.hit) {
+            if (CFG.debug && typeof performance !== "undefined") {
+                _perf.hit.n++;
+            }
+            return c.val;
+        }
+        let res;
+        if (CFG.debug && typeof performance !== "undefined") {
+            const t0 = performance.now();
+            res = sanitizeHrefRaw(href);
+            const us = (performance.now() - t0) * 1000;
+            _perf.cold.n++;
+            _perf.cold.total += us;
+            if (us > _perf.cold.max) _perf.cold.max = us;
+        } else {
+            res = sanitizeHrefRaw(href);
+        }
         lruSet(key, res);
         return res;
     }
@@ -2315,7 +2726,8 @@
 
     let _serpBusy = false;
     function stripSERPBar() {
-        if (!CFG.stripSERPParams || _serpBusy || !isActive()) return;
+        // v3.0.0 (#19): per-site profile override, then global default.
+        if (!eff("stripSERPParams") || _serpBusy || !isActive()) return;
         const eng = getEngine(location.hostname);
         if (!eng || !eng.s) return;
         try {
@@ -2513,7 +2925,11 @@
     ];
 
     const CONSENT_SCOPE_RE = /(consent|cookie|gdpr|privacy|cmp|banner|notice)/i;
-    const CONSENT_WORD_RE = /(reject|decline|refuse|opt[-\s]?out|deny|necessary only|essentials? only)/i;
+    // v3.0.0 (#10): multilingual reject wording — the generic consent gate now
+    // understands 12 languages instead of English-only.
+    const CONSENT_WORD_RE = /(reject|decline|refuse|deny|opt[-\s]?out|necessary only|essentials? only|ablehnen|verweigern|nur notwendige|refuser|rechazar|rifiuta|odrzuć|odrzuc|weigeren|weigern|rejeitar|recusar|رفض|拒否|거부|거절)/i;
+    // Negative signal for the classifier: accept-style wording vetoes a click.
+    const CONSENT_ACCEPT_RE = /(accept|agree|allow|annehmen|akzeptieren|accepter|aceptar|accetta|zaakceptuj|accepteren|aceitar|موافق|قبول|同意|동의)/i;
 
     // For generic matches: require (1) a consent-ish ancestor within 6 levels and
     // (2) reject-style wording in the element's own accessible text. Either alone
@@ -2541,7 +2957,9 @@
 
     // Bug Fix: Use WeakSet to allow auto-reject to run dynamically on re-rendered or multi-step banners
     let _clickedConsents = new WeakSet();
+    let _darkPatterns = 0; // v3.0.0 (#25) — report-only dark-pattern counter
     function autoRejectConsent() {
+        if (!eff("enforcePrivacyPresets")) return; // v3.0.0 (#19) per-site override
         try {
             for (let i = 0; i < CONSENT_SELECTORS.length; i++) {
                 const rule = CONSENT_SELECTORS[i];
@@ -2559,6 +2977,65 @@
                         log("auto-rejected consent banner element:", el);
                     } catch (e) {}
                 }
+            }
+            consentClassifierPass();
+            auditConsentDarkPatterns();
+        } catch (e) {}
+    }
+
+    // v3.0.0 (#10) — scored classifier fallback for CMPs the selector list
+    // doesn't know. ONLY buttons are eligible (anchor links can navigate — they
+    // are never auto-clicked), and a strict point threshold must be crossed:
+    // consent-scoped ancestor (+3), multilingual reject wording (+3), accept
+    // wording present (-4 veto), button-like tag/role (+1). Clicks need ≥6.
+    function consentClassifierPass() {
+        try {
+            const cands = document.querySelectorAll("button, [role='button'], input[type='button'], input[type='submit']");
+            const cap = Math.min(cands.length, 350);
+            for (let i = 0; i < cap; i++) {
+                const el = cands[i];
+                if (_clickedConsents.has(el)) continue;
+                if (el.disabled) continue;
+                if (!(el.offsetParent !== null || el.getClientRects().length > 0)) continue;
+                const text = (el.textContent || "") + " " + (el.getAttribute && (el.getAttribute("aria-label") || "")) + " " + (el.value || "");
+                if (CONSENT_ACCEPT_RE.test(text)) continue; // hard veto
+                let score = 0;
+                if (looksLikeConsentChoice(el)) score += 3;
+                else continue; // scope is mandatory
+                if (CONSENT_WORD_RE.test(text)) score += 3;
+                else continue; // explicit reject wording is mandatory
+                score += 1; // button-shaped interactive element
+                if (score < 6) continue;
+                _clickedConsents.add(el);
+                try {
+                    el.click();
+                    recordActivity("auto-rejected consent", location.href, "classifier");
+                    log("consent classifier rejected banner element:", el);
+                } catch (e) {}
+            }
+        } catch (e) {}
+    }
+
+    // v3.0.0 (#25) — dark-pattern auditor, REPORT-ONLY by design: counts
+    // banners with pre-ticked boxes or no visible reject path. Surfaces a stat;
+    // never interacts.
+    function auditConsentDarkPatterns() {
+        if (!CFG.statistics) return;
+        try {
+            const boxes = document.querySelectorAll("[id*=consent i], [class*=consent i], [id*=cookie i], [class*=cookie i], [role=dialog]");
+            const cap = Math.min(boxes.length, 40);
+            for (let i = 0; i < cap; i++) {
+                const box = boxes[i];
+                if (box.__ntDarkAudited) continue;
+                box.__ntDarkAudited = true;
+                if (!(box.offsetParent !== null || box.getClientRects().length > 0)) continue;
+                let dark = false;
+                const cks = box.querySelectorAll("input[type='checkbox']:checked");
+                if (cks.length > 0) dark = true; // pre-ticked consent
+                const hasAccept = /(accept|agree|allow|alle)/i.test(box.textContent || "");
+                const hasReject = CONSENT_WORD_RE.test(box.textContent || "");
+                if (hasAccept && !hasReject) dark = true; // no visible refuse path
+                if (dark) _darkPatterns++;
             }
         } catch (e) {}
     }
@@ -2715,6 +3192,14 @@
             _cfgDirty = true;
             _rawCfg = null;
             loadCfg();
+        }, true);
+
+        // v3.0.0 (#28): content world signals a BFCache restore — any one-shot
+        // navigation latches from the PREVIOUS visit must re-arm.
+        doc.addEventListener("nt:bfcache", function() {
+            try {
+                _navigatedMW = false;
+            } catch (e) {}
         }, true);
 
         const GRE = /\.google\.(?:[a-z]{2,3})(?:\.[a-z]{2})?$/;
@@ -3398,6 +3883,130 @@
                 } catch (e) {}
             } catch (e) {}
         }
+
+        // v3.0.0 (#7) — Consolidated Hook 9: JS-driven navigation unwrap.
+        // Anchor/pushState/window.open were already covered; a page calling
+        // location.assign("https://google.com/url?q=…") was not. Same
+        // destination-preserving unwrap — the hop is skipped, never altered.
+        try {
+            const unwrapDest = function(u) {
+                try {
+                    loadCfg();
+                    if (!cfg.active) return u;
+                    const url = new win.URL(String(u), win.location.href);
+                    const r = realLink(url);
+                    return r || u;
+                } catch (e) {
+                    return u;
+                }
+            };
+            const loc = win.location;
+            if (loc) {
+                [ "assign", "replace" ].forEach(fn => {
+                    try {
+                        const orig = loc[fn];
+                        if (typeof orig !== "function") return;
+                        const bound = orig.bind(loc);
+                        const fake = function(u) {
+                            return bound(unwrapDest(u));
+                        };
+                        camouflage(fake, orig);
+                        loc[fn] = fake;
+                    } catch (e) {}
+                });
+                // Location.href setter — [Unforgeable] in Blink, so this is
+                // best-effort and silently skipped where locked.
+                try {
+                    const locProto = Object.getPrototypeOf(loc);
+                    const hd = Object.getOwnPropertyDescriptor(locProto, "href");
+                    if (hd && hd.set && hd.configurable !== false) {
+                        Object.defineProperty(locProto, "href", {
+                            configurable: true,
+                            enumerable: hd.enumerable,
+                            get: hd.get,
+                            set: function(v) {
+                                return hd.set.call(this, unwrapDest(v));
+                            }
+                        });
+                    }
+                } catch (e) {}
+            }
+        } catch (e) {}
+
+        // v3.0.0 (#9) — Consolidated Hook 10: tracker-respawn watcher. After
+        // NullTrail purges tracker storage, sites often re-create the keys at
+        // once. Default: count attempts (surfaced in Stats). respawnStrict
+        // (opt-in): drop tracker writes at the source.
+        try {
+            if (typeof win.__ntRespawns !== "number") win.__ntRespawns = 0;
+            const getTRE = function() {
+                try {
+                    return cfg.trackerRe ? new RegExp(cfg.trackerRe, "i") : null;
+                } catch (e) {
+                    return null;
+                }
+            };
+            const sset = win.Storage && win.Storage.prototype && win.Storage.prototype.setItem;
+            if (sset) {
+                const fakeSetItem = function(k, v) {
+                    try {
+                        const tre = getTRE();
+                        if (tre && tre.test(String(k))) {
+                            win.__ntRespawns++;
+                            loadCfg();
+                            if (cfg.respawnStrict) return; // dropped at source
+                        }
+                    } catch (e) {}
+                    return sset.apply(this, arguments);
+                };
+                win.Storage.prototype.setItem = fakeSetItem;
+                camouflage(fakeSetItem, sset);
+            }
+            const cookieDesc = Object.getOwnPropertyDescriptor(win.Document.prototype, "cookie");
+            if (cookieDesc && cookieDesc.set && cookieDesc.configurable !== false) {
+                Object.defineProperty(win.Document.prototype, "cookie", {
+                    configurable: true,
+                    enumerable: cookieDesc.enumerable,
+                    get: cookieDesc.get,
+                    set: function(v) {
+                        try {
+                            const tre = getTRE();
+                            if (tre) {
+                                const name = String(v).split("=")[0].trim();
+                                if (tre.test(name)) {
+                                    win.__ntRespawns++;
+                                    loadCfg();
+                                    if (cfg.respawnStrict) return;
+                                }
+                            }
+                        } catch (e) {}
+                        return cookieDesc.set.call(this, v);
+                    }
+                });
+            }
+        } catch (e) {}
+
+        // v3.0.0 (#12) — Consolidated Hook 11: open shadow-root registry.
+        // MutationObservers cannot see inside shadow trees; register OPEN roots
+        // (closed ones stay a hard privacy boundary — our own dashboard uses
+        // one) so the content world can observe and clean them.
+        try {
+            const asFn = ElementProto.attachShadow;
+            if (asFn) {
+                const fakeAttachShadow = function(init) {
+                    const root = asFn.call(this, init);
+                    try {
+                        if (init && init.mode === "open") {
+                            const bag = win.__ntShadowRoots || (win.__ntShadowRoots = []);
+                            if (bag.length < 50) bag.push(root);
+                        }
+                    } catch (e) {}
+                    return root;
+                };
+                win.Element.prototype.attachShadow = fakeAttachShadow;
+                camouflage(fakeAttachShadow, asFn);
+            }
+        } catch (e) {}
     }
 
     let _ttp = null;
@@ -3478,7 +4087,10 @@
                 blockKeepalive: CFG.blockKeepalive,
                 blockIPLoggers: CFG.blockIPLoggers,
                 unblockContextMenu: isSiteContextMenuUnblocked(),
-                unblockTextSelection: isSiteTextSelectionUnblocked()
+                unblockTextSelection: isSiteTextSelectionUnblocked(),
+                // v3.0.0 (#9): respawn watcher config
+                respawnStrict: !!CFG.respawnStrict,
+                trackerRe: TRACKER_STORAGE_RE.source
             };
             m.setAttribute("content", btoa(unescape(encodeURIComponent(JSON.stringify(payload)))));
             window.dispatchEvent(new CustomEvent("nt:cfg"));
@@ -3512,6 +4124,7 @@
                 el.removeAttribute("onmousedown");
                 applyRP(el);
                 PROCESSED.set(el, hrefNow);
+                recordActivity("flagged IP-logger", el.href, "IP_LOGGERS");
                 return;
             }
             if (CFG.noping && el.hasAttribute && el.hasAttribute("ping")) el.removeAttribute("ping");
@@ -3530,7 +4143,19 @@
                 log("sanitizeHref failed", e);
             }
             const didChange = cleaned && cleaned !== orig;
+            // v3.0.0 (#17) — per-site dry-run: classify & count everything,
+            // rewrite nothing. Builds trust before the user goes live on a site.
+            if (didChange && isSiteDryRun()) {
+                recordActivity("dry-run: would clean", orig, "sanitizeHref");
+                _pageCount++;
+                if (CFG.showHUD) updateHUD();
+                PROCESSED.set(el, hrefNow);
+                removeTrackAttrs(el);
+                applyRP(el);
+                return;
+            }
             if (didChange) {
+                recordActivity("cleaned", cleaned, "sanitizeHref");
                 try {
                     // Critical Compatibility Mitigation: store the original href in
                     // data-nt-orig-href so website JS still sees what it expects.
@@ -3550,7 +4175,8 @@
             }
             removeTrackAttrs(el);
             // Bug Fix: Automatically scan and clean dataset attributes during link sanitization
-            cleanDataset(el);
+            // v3.0.0 (#29): shed this expensive pass when the queue is deep.
+            if (!_shedMode) cleanDataset(el);
             PROCESSED.set(el, hrefNow);
             if (didChange) bumpPageCount();
         } finally {
@@ -3611,7 +4237,8 @@
     const BG_RESOLVE_PAGE_CAP = 25;
     let _bgResolveCount = 0;
     function preResolveServerRedirect(el) {
-        if (!CFG.serverRedirectResolution) return;
+        // v3.0.0 (#19): per-site profile override (e.g. resolve ONLY on SERPs).
+        if (!eff("serverRedirectResolution")) return;
         // Metered gate (v2.3.0): never spend hover traffic on metered/data-saver links.
         if (!backgroundDataAllowed()) return;
         if (typeof GM_xmlhttpRequest !== "function") return;
@@ -3744,6 +4371,54 @@
     // Network-Budgeted Idle Frame DOM Link Cleaner (Keeps UI buttery smooth at 60/120fps)
     let linkCleaningQueue = [];
     let isCleanupScheduled = false;
+    // v3.0.0 (#29) — pressure shedding: beyond this queue depth the cleaner
+    // drops the expensive dataset scrub and keeps only href safety work.
+    let _shedMode = false;
+    const SHED_DEPTH = 600;
+
+    // v3.0.0 (#29) — viewport-first ordering: links register with an
+    // IntersectionObserver (200px lookahead); visible ones jump the queue,
+    // off-screen ones are cleaned by bounded background drains (nothing is
+    // ever skipped — only ordering changes).
+    let _io = null;
+    const _pendingIO = new Set();
+    if (typeof IntersectionObserver !== "undefined") {
+        try {
+            _io = new IntersectionObserver(function(entries) {
+                for (let i = 0; i < entries.length; i++) {
+                    if (!entries[i].isIntersecting) continue;
+                    const el = entries[i].target;
+                    try { _io.unobserve(el); } catch (e) {}
+                    _pendingIO.delete(el);
+                    if (QUEUED.has(el)) {
+                        linkCleaningQueue.unshift(el); // visible links first
+                        ensureCleanupScheduled();
+                    }
+                }
+            }, { rootMargin: "200px" });
+        } catch (e) {
+            _io = null;
+        }
+    }
+
+    function drainIOPending() {
+        // Bounded iterator (not forEach): forEach would scan the whole set on
+        // every call — O(n²) on multi-thousand-link pages.
+        let n = 0;
+        const it = _pendingIO.values();
+        while (n < 96) {
+            const nx = it.next();
+            if (nx.done) break;
+            const el = nx.value;
+            _pendingIO.delete(el);
+            if (_io) {
+                try { _io.unobserve(el); } catch (e) {}
+            }
+            linkCleaningQueue.push(el);
+            n++;
+        }
+        if (linkCleaningQueue.length > 0) ensureCleanupScheduled();
+    }
 
     function processBatchQueue(deadline) {
         const hasDeadline = deadline && typeof deadline.timeRemaining === "function";
@@ -3775,7 +4450,23 @@
             }
         } else {
             isCleanupScheduled = false;
+            _shedMode = false;
             scanAndClickAds();
+            // Background tier (#29): keep draining pending below-fold links in
+            // bounded batches until everything registered is clean.
+            drainIOPending();
+        }
+    }
+
+    function ensureCleanupScheduled() {
+        if (isCleanupScheduled) return;
+        isCleanupScheduled = true;
+        // #29: under pressure, shed the expensive dataset scrub for this drain.
+        _shedMode = linkCleaningQueue.length > SHED_DEPTH;
+        if (typeof requestIdleCallback === "function") {
+            requestIdleCallback(processBatchQueue, { timeout: 1000 });
+        } else {
+            setTimeout(processBatchQueue, 40);
         }
     }
 
@@ -3784,21 +4475,93 @@
         // could pile up dozens of duplicate queue entries per mutation burst.
         if (!el || QUEUED.has(el)) return;
         QUEUED.add(el);
-        linkCleaningQueue.push(el);
-        if (!isCleanupScheduled) {
-            isCleanupScheduled = true;
-            if (typeof requestIdleCallback === "function") {
-                requestIdleCallback(processBatchQueue, { timeout: 1000 });
-            } else {
-                setTimeout(processBatchQueue, 40);
-            }
+        if (_io) {
+            // #29: defer to visibility; the IO callback unshifts visible links
+            // to the front, drainIOPending guarantees background completion.
+            _pendingIO.add(el);
+            try { _io.observe(el); } catch (e) {}
+            drainIOPending();
+            return;
         }
+        linkCleaningQueue.push(el);
+        ensureCleanupScheduled();
     }
 
     function scanDom() {
         try {
             const els = document.querySelectorAll("a[href],area[href]");
             for (let i = 0; i < els.length; i++) scheduleElementCleanup(els[i]);
+        } catch (e) {}
+        drainShadowRoots();
+        scanSameOriginFrames();
+    }
+
+    // v3.0.0 (#12) — clean anchors registered inside OPEN shadow roots by the
+    // main-world attachShadow hook, then keep observing them.
+    const _shadowObserved = new WeakSet();
+    function drainShadowRoots() {
+        try {
+            const w = (typeof unsafeWindow !== "undefined") ? unsafeWindow : window;
+            const bag = w.__ntShadowRoots;
+            if (!bag || !bag.length) return;
+            while (bag.length) {
+                const root = bag.shift();
+                if (!root || _shadowObserved.has(root)) continue;
+                _shadowObserved.add(root);
+                try {
+                    const as = root.querySelectorAll ? root.querySelectorAll("a[href],area[href]") : [];
+                    for (let i = 0; i < as.length; i++) scheduleElementCleanup(as[i]);
+                    if (typeof MutationObserver !== "undefined" && _shadowObserver) {
+                        _shadowObserver.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: [ "href" ] });
+                    }
+                } catch (e) {}
+            }
+        } catch (e) {}
+    }
+    const _shadowObserver = (typeof MutationObserver !== "undefined") ? new MutationObserver(function(records) {
+        for (let ri = 0; ri < records.length; ri++) {
+            const rec = records[ri];
+            if (rec.type === "childList") {
+                for (let ni = 0; ni < rec.addedNodes.length; ni++) {
+                    const node = rec.addedNodes[ni];
+                    if (node.nodeType !== 1) continue;
+                    if ((node.tagName === "A" || node.tagName === "AREA") && node.href) scheduleElementCleanup(node);
+                    else if (node.querySelectorAll) {
+                        const as = node.querySelectorAll("a[href],area[href]");
+                        for (let ai = 0; ai < as.length; ai++) scheduleElementCleanup(as[ai]);
+                    }
+                }
+            } else if (rec.type === "attributes") {
+                const t = rec.target;
+                if ((t.tagName === "A" || t.tagName === "AREA") && t.href && !LOCK.has(t)) scheduleElementCleanup(t);
+            }
+        }
+    }) : null;
+
+    // v3.0.0 (#11) — opt-in same-origin iframe cleaning, driven from the TOP
+    // document so @noframes stays (no script injection into ad frames).
+    // Cross-origin frames throw on contentDocument access and are skipped.
+    const FRAMES_MAX = 10;
+    const _framesObserved = new WeakSet();
+    function scanSameOriginFrames() {
+        if (!CFG.deepFrames || !isActive()) return;
+        try {
+            const frames = document.querySelectorAll("iframe");
+            let done = 0;
+            for (let i = 0; i < frames.length && done < FRAMES_MAX; i++) {
+                const fr = frames[i];
+                try {
+                    const fd = fr.contentDocument;
+                    if (!fd || _framesObserved.has(fd)) continue;
+                    _framesObserved.add(fd);
+                    done++;
+                    const as = fd.querySelectorAll("a[href],area[href]");
+                    for (let ai = 0; ai < as.length; ai++) scheduleElementCleanup(as[ai]);
+                    if (_shadowObserver) {
+                        _shadowObserver.observe(fd, { childList: true, subtree: true, attributes: true, attributeFilter: [ "href" ] });
+                    }
+                } catch (e) { /* cross-origin — leave alone */ }
+            }
         } catch (e) {}
     }
 
@@ -3850,6 +4613,46 @@
                         }
                     }
                 }
+            }
+            // v3.0.0 (#13) — tracker-bound speculative-tag neutralizer. Pages
+            // waste metered users' bytes with prefetch/prerender/preconnect to
+            // AD/LOGGER domains; drop ONLY those, ONLY on metered links, and
+            // never first-party/functional hints.
+            if (CFG.respectMetered && isMeteredConnection()) {
+                const hints = document.querySelectorAll("link[rel~=prefetch i], link[rel~=prerender i], link[rel~=preconnect i]");
+                for (i = 0; i < hints.length; i++) {
+                    const ln = hints[i];
+                    try {
+                        const href = ln.href || ln.getAttribute("href") || "";
+                        if (!href) continue;
+                        const host = new URL(href, location.href).hostname.toLowerCase();
+                        if (host && host !== location.hostname.toLowerCase() && (AD_TRACKER_HOSTS_RE.test(host) || IP_LOGGERS.test(host))) {
+                            ln.remove();
+                            recordActivity("dropped tracker prefetch", href, "metered-neutralizer");
+                        }
+                    } catch (e) {}
+                }
+            }
+        } catch (e) {}
+    }
+
+    // v3.0.0 (#15) — AMP→canonical redirect, per-site opt-in. AMP pages ping
+    // Google and proxy content; the canonical is the publisher's own URL.
+    // Off everywhere unless the user enables it for the current site.
+    let _ampChecked = false;
+    function ensureAMPCanonical() {
+        if (_ampChecked) return;
+        _ampChecked = true;
+        try {
+            const host = location.hostname.toLowerCase();
+            if (!ampCanonicalSites[host]) return;
+            const isAmp = /(^|\/)amp(\/|$)/i.test(location.pathname) || document.documentElement.hasAttribute("amp") || document.documentElement.hasAttribute("⚡");
+            if (!isAmp) return;
+            const canon = document.querySelector("link[rel='canonical' i]");
+            const target = canon && (canon.href || canon.getAttribute("href"));
+            if (target && /^https?:\/\//i.test(target) && isGoodLink(target) && target !== location.href) {
+                log("AMP page — redirecting to canonical:", target);
+                location.replace(target);
             }
         } catch (e) {}
     }
@@ -4028,7 +4831,8 @@
     // exactly zero bytes unless the user explicitly opted into redirect resolution.
     // Cheap boolean checks run before any DOM traversal.
     document.addEventListener("mouseover", function(e) {
-        if (!CFG.serverRedirectResolution) return;
+        // v3.0.0 (#19): eff() honors per-site overrides (on-here-only or off-here).
+        if (!eff("serverRedirectResolution")) return;
         if (!isEngineHost(location.hostname)) return;
         const el = findAnchor(e.target);
         if (!el || !el.href) return;
@@ -4094,6 +4898,151 @@
         if (el && el.href) cleanAnchor(el);
     }, true);
 
+    // v3.0.0 (#22) — personas: preset mappings over existing toggles only.
+    const PERSONA_PRESETS = {
+        gentle: {
+            serverRedirectResolution: false, activeAdObfuscation: false, deepFrames: false,
+            respawnStrict: false, stagedRules: true, globalStatus: true
+        },
+        balanced: {
+            serverRedirectResolution: false, activeAdObfuscation: false, deepFrames: false,
+            respawnStrict: false, stagedRules: true, globalStatus: true
+        },
+        paranoid: {
+            serverRedirectResolution: true, deepFrames: true, respawnStrict: true,
+            stagedRules: true, globalStatus: true, blockGA: true, blockPrivacySandbox: true,
+            blockKeepalive: true, blockIPLoggers: true, blockBounceRedirect: true,
+            enforcePrivacyPresets: true, purgeGACookies: true, purgeStorage: true,
+            stripSERPParams: true, forceNoReferrer: true, relNoReferrer: true, noping: true
+        }
+    };
+    function applyPersona(name) {
+        const p = PERSONA_PRESETS[name];
+        if (!p) return;
+        Object.keys(p).forEach(k => {
+            CFG[k] = p[k];
+            SV(k, p[k]);
+        });
+        lruClear();
+        pushConfigToPage();
+    }
+
+    // v3.0.0 (#23) — offline backup/restore with strict schema validation.
+    // Keys are host-pattern filtered (prototype-pollution safe); booleans are
+    // type-checked against the CURRENT defaults, so unknown keys can't land.
+    function exportSettings() {
+        try {
+            const payload = {
+                ntExport: 3,
+                exportedAt: new Date().toISOString(),
+                toggles: {},
+                whitelist: String(GV("whitelist", "")),
+                siteProfiles: siteProfiles,
+                dryRunSites: dryRunSites,
+                ampCanonicalSites: ampCanonicalSites,
+                unblockContextMenuSites: unblockContextMenuSites,
+                unblockTextSelectionSites: unblockTextSelectionSites,
+                userStripRules: Array.isArray(CFG.userStripRules) ? CFG.userStripRules : []
+            };
+            Object.keys(CFG).forEach(k => {
+                if (typeof CFG[k] === "boolean" || k === "referrerPolicy") payload.toggles[k] = CFG[k];
+            });
+            const json = JSON.stringify(payload, null, 2);
+            const blob = new Blob([ json ], { type: "application/json" });
+            const a = document.createElement("a");
+            const objUrl = URL.createObjectURL(blob);
+            a.href = objUrl;
+            a.download = "nulltrail-settings.json";
+            (document.body || document.documentElement).appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(function() {
+                try { URL.revokeObjectURL(objUrl); } catch (e) {}
+            }, 4000);
+        } catch (e) {}
+    }
+
+    const HOST_KEY_RE = /^[a-z0-9][a-z0-9.\-]{0,252}$/i;
+    function saneHostMap(v) {
+        if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+        const out = {};
+        Object.keys(v).forEach(h => {
+            if (!HOST_KEY_RE.test(h)) return;
+            if (typeof v[h] === "boolean") out[h] = v[h];
+            else if (v[h] && typeof v[h] === "object" && !Array.isArray(v[h])) {
+                const inner = {};
+                Object.keys(v[h]).forEach(k2 => {
+                    if (typeof v[h][k2] === "boolean" && typeof CFG[k2] === "boolean") inner[k2] = v[h][k2];
+                });
+                if (Object.keys(inner).length) out[h] = inner;
+            } else if (v[h]) {
+                out[h] = true;
+            }
+        });
+        return out;
+    }
+
+    function importSettings(text) {
+        try {
+            const data = JSON.parse(String(text || ""));
+            if (!data || typeof data !== "object" || !data.ntExport) return "Not a NullTrail backup";
+            let applied = 0;
+            if (data.toggles && typeof data.toggles === "object") {
+                Object.keys(CFG).forEach(k => {
+                    if (typeof CFG[k] === "boolean" && typeof data.toggles[k] === "boolean") {
+                        CFG[k] = data.toggles[k];
+                        SV(k, CFG[k]);
+                        applied++;
+                    }
+                });
+                if (data.toggles.referrerPolicy === "origin" || data.toggles.referrerPolicy === "no-referrer") {
+                    CFG.referrerPolicy = data.toggles.referrerPolicy;
+                    SV("referrerPolicy", CFG.referrerPolicy);
+                    applied++;
+                }
+            }
+            if (typeof data.whitelist === "string" && data.whitelist.length <= 20000) {
+                WHITELIST = data.whitelist;
+                SV("whitelist", WHITELIST);
+                applied++;
+            }
+            const maps = [
+                [ "siteProfiles", v => { siteProfiles = v; SV("siteProfiles", v); } ],
+                [ "dryRunSites", v => { dryRunSites = v; SV("dryRunSites", v); } ],
+                [ "ampCanonicalSites", v => { ampCanonicalSites = v; SV("ampCanonicalSites", v); } ],
+                [ "unblockContextMenuSites", v => { unblockContextMenuSites = v; SV("unblockContextMenuSites", v); } ],
+                [ "unblockTextSelectionSites", v => { unblockTextSelectionSites = v; SV("unblockTextSelectionSites", v); } ]
+            ];
+            maps.forEach(pair => {
+                const sv = saneHostMap(data[pair[0]]);
+                if (sv) {
+                    pair[1](sv);
+                    applied++;
+                }
+            });
+            if (Array.isArray(data.userStripRules)) {
+                const rules = [];
+                data.userStripRules.forEach(r => {
+                    if (typeof r === "string" && r.length > 0 && r.length <= 100 && !/[\\[\](){}|^$+?]/.test(r.slice(1))) {
+                        try {
+                            new RegExp("^(?:" + r + ")$", "i");
+                            rules.push(r);
+                        } catch (e) {}
+                    }
+                });
+                CFG.userStripRules = rules.slice(0, 200);
+                SV("userStripRules", CFG.userStripRules);
+                applied++;
+            }
+            lruClear();
+            rebuildRulesWithUserRules();
+            pushConfigToPage();
+            return applied > 0 ? ("Imported " + applied + " setting groups") : "Nothing valid found to import";
+        } catch (e) {
+            return "Import failed: invalid JSON";
+        }
+    }
+
     function ntStyle(el, css) {
         el.style.cssText = css;
         return el;
@@ -4144,6 +5093,13 @@
             [ "enforcePrivacyPresets", "Enforce Maximum Shielding automatically" ]
         ]
     }, {
+        title: "Coverage & Trust",
+        items: [
+            [ "deepFrames", "Also clean same-origin embedded frames" ],
+            [ "stagedRules", "Soak new rules 72h before activating (safest)" ],
+            [ "respawnStrict", "Actively block tracker re-creation (strict)" ]
+        ]
+    }, {
         title: "Advanced Maintenance",
         items: [
             [ "respectMetered", "Save Mobile Data (metered-network friendly)" ],
@@ -4175,7 +5131,10 @@
         respectMetered: "Pauses every optional background download while your connection is metered or your system/browser Data-Saver is enabled.",
         autoUpdateRules: "Downloads updated cleaning rules about every 6 days. Skipped on metered networks; failed attempts back off gently.",
         showHUD: "Shows a small on-page counter of links NullTrail has cleaned.",
-        debug: "Writes verbose diagnostic logs to the browser console."
+        debug: "Writes verbose diagnostic logs to the browser console.",
+        deepFrames: "Optional: also sanitizes links inside same-origin embedded frames. Cross-origin frames are never touched.",
+        stagedRules: "Downloaded rules wait 72h before taking effect, so a bad upstream update can't break your browsing instantly. You can always activate early from the Rules tab.",
+        respawnStrict: "When a site re-creates tracker storage NullTrail removed, drop the new write at the source. Report-only when off; forceful when on."
     };
 
     function openDashboard() {
@@ -4234,7 +5193,7 @@
         const hdr = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06)");
         const hdrLeft = ntEl("div", null, "display:flex;flex-direction:column");
         hdrLeft.appendChild(ntEl("span", "NullTrail", "font-size:17px;font-weight:700;color:#14b8a6"));
-        hdrLeft.appendChild(ntEl("span", "v2.6.0", "font-size:11px;color:#6b7280;margin-top:2px"));
+        hdrLeft.appendChild(ntEl("span", "v3.0.0", "font-size:11px;color:#6b7280;margin-top:2px"));
         hdr.appendChild(hdrLeft);
         const closeBtn = ntEl("button", "×", "background:none;border:none;color:#9ca3af;font-size:24px;cursor:pointer;padding:0 4px;line-height:1");
         closeBtn.title = "Close (Esc)";
@@ -4246,7 +5205,7 @@
         box.appendChild(hdr);
         const tabBar = ntEl("div", null, "display:flex;border-bottom:1px solid rgba(255,255,255,.06);background:rgba(0,0,0,.15)");
         try { tabBar.setAttribute("role", "tablist"); } catch (e) {}
-        const tabs = [ "Settings", "Sites", "Stats", "Rules", "About" ];
+        const tabs = [ "Settings", "Sites", "Stats", "Activity", "Rules", "About" ];
         const tabBtns = [];
         const content = ntEl("div", null, "flex:1;overflow:auto;padding:18px 20px");
         try { content.setAttribute("role", "tabpanel"); } catch (e) {}
@@ -4265,7 +5224,8 @@
             if (idx === 0) renderSettings(); 
             else if (idx === 1) renderSites(); 
             else if (idx === 2) renderStats(); 
-            else if (idx === 3) renderRules(); 
+            else if (idx === 3) renderActivity();
+            else if (idx === 4) renderRules(); 
             else renderAbout();
         }
         
@@ -4387,6 +5347,122 @@
             });
             row2.appendChild(cb2);
             content.appendChild(row2);
+
+            // ============ v3.0.0 — per-site protection controls ============
+            content.appendChild(ntEl("div", "Protection Modes For This Website", "font-size:14px;font-weight:600;margin-top:20px;margin-bottom:8px"));
+
+            // #18 timed pause — protection that can NEVER be forgotten off.
+            if (isPaused()) {
+                const when = pauseUntil > 0 ? new Date(pauseUntil).toLocaleTimeString() : null;
+                content.appendChild(ntEl("div", _sessionPaused ? "Protection PAUSED for this tab session" : "Protection PAUSED — auto-resumes at " + when, "font-size:12px;font-weight:600;color:#f59e0b;margin-bottom:6px"));
+                const resumeBtn = ntEl("button", "Resume protection now", "width:100%;padding:8px;border:none;border-radius:6px;background:#14b8a6;color:#fff;font-size:12px;font-weight:600;cursor:pointer;margin-bottom:6px");
+                resumeBtn.addEventListener("click", function() {
+                    pauseUntil = 0;
+                    _sessionPaused = false;
+                    SV("pauseUntil", 0);
+                    pushConfigToPage();
+                    renderSites();
+                });
+                content.appendChild(resumeBtn);
+            } else {
+                const pRow = ntEl("div", null, "display:flex;gap:8px;margin-bottom:4px");
+                const p1 = ntEl("button", "Pause 1 hour", "flex:1;padding:8px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#dfe4ee;font-size:12px;cursor:pointer");
+                p1.title = "Auto-resumes after 60 minutes — you can't forget protection off.";
+                p1.addEventListener("click", function() {
+                    pauseUntil = Date.now() + 3600 * 1000;
+                    SV("pauseUntil", pauseUntil);
+                    pushConfigToPage();
+                    renderSites();
+                });
+                const p2 = ntEl("button", "Pause this session", "flex:1;padding:8px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#dfe4ee;font-size:12px;cursor:pointer");
+                p2.title = "Paused in this tab until you close it or resume manually.";
+                p2.addEventListener("click", function() {
+                    _sessionPaused = true;
+                    pushConfigToPage();
+                    renderSites();
+                });
+                pRow.appendChild(p1);
+                pRow.appendChild(p2);
+                content.appendChild(pRow);
+            }
+
+            // #17 dry-run mode for this site
+            content.appendChild(makeSiteFlag(
+                "Dry-run mode on this website (classify & count, rewrite nothing)",
+                "NullTrail reports what it WOULD do here without changing anything — validate precision first.",
+                !!dryRunSites[host],
+                function(on) {
+                    if (on) dryRunSites[host] = true;
+                    else delete dryRunSites[host];
+                    SV("dryRunSites", dryRunSites);
+                }
+            ));
+
+            // #15 AMP→canonical per-site opt-in
+            content.appendChild(makeSiteFlag(
+                "Leave AMP pages for the canonical (publisher) version",
+                "On AMP articles, redirects you to the site's own canonical URL. Reloads the page when triggered.",
+                !!ampCanonicalSites[host],
+                function(on) {
+                    if (on) ampCanonicalSites[host] = true;
+                    else delete ampCanonicalSites[host];
+                    SV("ampCanonicalSites", ampCanonicalSites);
+                }
+            ));
+
+            // #19 per-site overrides (Inherit / Force on / Force off)
+            content.appendChild(ntEl("div", "Per-Site Feature Overrides", "font-size:14px;font-weight:600;margin-top:20px;margin-bottom:8px"));
+            [ [ "serverRedirectResolution", "Resolve server redirects on hover" ],
+              [ "stripSERPParams", "Strip search-result URL parameters" ],
+              [ "enforcePrivacyPresets", "Auto privacy presets & consent rejection" ] ].forEach(function(pair) {
+                const key = pair[0], label = pair[1];
+                const row = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:6px 0;font-size:13px;color:#dfe4ee");
+                row.appendChild(ntEl("span", label));
+                const sel = document.createElement("select");
+                ntStyle(sel, "background:#0e1219;color:#dfe4ee;border:1px solid rgba(255,255,255,.12);border-radius:6px;padding:4px 6px;font-size:12px;cursor:pointer");
+                const cur = (siteProfiles[host] && Object.prototype.hasOwnProperty.call(siteProfiles[host], key)) ? (siteProfiles[host][key] ? "on" : "off") : "inherit";
+                [ [ "inherit", "Inherit (" + (CFG[key] ? "on" : "off") + ")" ], [ "on", "Force on here" ], [ "off", "Force off here" ] ].forEach(function(o) {
+                    const opt = document.createElement("option");
+                    opt.value = o[0];
+                    opt.textContent = o[1];
+                    if (o[0] === cur) opt.selected = true;
+                    sel.appendChild(opt);
+                });
+                sel.addEventListener("change", function() {
+                    const v = sel.value;
+                    if (v === "inherit") {
+                        if (siteProfiles[host]) delete siteProfiles[host][key];
+                    } else {
+                        siteProfiles[host] = siteProfiles[host] || {};
+                        siteProfiles[host][key] = (v === "on");
+                    }
+                    if (siteProfiles[host] && Object.keys(siteProfiles[host]).length === 0) delete siteProfiles[host];
+                    SV("siteProfiles", siteProfiles);
+                    pushConfigToPage();
+                    renderSites();
+                });
+                row.appendChild(sel);
+                content.appendChild(row);
+            });
+        }
+
+        // v3.0.0 — compact per-site flag row factory (shared by the modes above).
+        function makeSiteFlag(label, hint, checked, onChange) {
+            const row = ntEl("label", null, "display:flex;align-items:center;justify-content:space-between;padding:8px 0;cursor:pointer;font-size:13px;color:#dfe4ee");
+            row.title = hint;
+            const sp = ntEl("span", label);
+            sp.title = hint;
+            row.appendChild(sp);
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.checked = !!checked;
+            cb.title = hint;
+            ntStyle(cb, "width:18px;height:18px;accent-color:#14b8a6;cursor:pointer;flex-shrink:0;margin-left:10px");
+            cb.addEventListener("change", function() {
+                onChange(cb.checked);
+            });
+            row.appendChild(cb);
+            return row;
         }
 
         // Stats renderer
@@ -4401,10 +5477,18 @@
             const dispCleaned = (GV("statCleaned", 0) | 0) + _deltaCleaned;
             const dispFields = (GV("statFields", 0) | 0) + _deltaFields;
             const dispBlocked = (GV("statBlocked", 0) | 0) + _deltaBlocked;
+            let respawns = 0;
+            try {
+                const w = (typeof unsafeWindow !== "undefined") ? unsafeWindow : window;
+                respawns = w.__ntRespawns | 0;
+            } catch (e) {}
             const rows = [ 
                 [ "Links Sanitized", dispCleaned ], 
                 [ "Query Parameters Stripped", dispFields ], 
                 [ "Tracking Requests Blocked", dispBlocked ], 
+                [ "Tracker Writes Observed (this page)" + (CFG.respawnStrict ? " — blocked at source" : ""), respawns ],
+                [ "Dark-Pattern Banners Seen (report only)", _darkPatterns ],
+                [ "Pending Stat Flush Deltas", _deltaCleaned + _deltaBlocked ],
                 [ "Database Cleaners Active", PROVIDERS.length ], 
                 [ "Engine Scrapers Configured", ENGINES.length ], 
                 [ "Bypass Handlers Loaded", DOMAIN_REDIRECTS.length ], 
@@ -4418,6 +5502,36 @@
                 row.appendChild(ntEl("span", String(r[1]), "font-size:13px;font-weight:600;color:#dfe4ee"));
                 content.appendChild(row);
             });
+            // v3.0.0 (#24) — 30-day inline-SVG sparkline (local-only buckets).
+            const daily = GV("statDaily", {}) || {};
+            const days = [];
+            for (let i = 29; i >= 0; i--) {
+                days.push(new Date(Date.now() - i * 86400000).toISOString().slice(0, 10));
+            }
+            const vals = days.map(d => (daily[d] ? ((daily[d].c | 0) + (daily[d].b | 0)) : 0));
+            const maxV = Math.max.apply(null, vals.concat([ 1 ]));
+            const hasData = vals.some(v => v > 0);
+            content.appendChild(ntEl("div", "Last 30 Days (links cleaned + trackers blocked)", "font-size:13px;font-weight:600;margin-top:18px;margin-bottom:6px"));
+            if (!hasData) {
+                content.appendChild(ntEl("div", "Daily history accumulates locally as you browse — it is pruned automatically after 90 days.", "font-size:11px;color:#6b7280;line-height:1.5"));
+            } else {
+                const W = 440, H = 64, BW = W / 30;
+                let bars = "";
+                vals.forEach(function(v, i) {
+                    const h = Math.max(v > 0 ? 2 : 0, Math.round((v / maxV) * (H - 6)));
+                    bars += "<rect x='" + (i * BW + 1).toFixed(1) + "' y='" + (H - h) + "' width='" + (BW - 2).toFixed(1) + "' height='" + h + "' rx='2' fill='#14b8a6'><title>" + days[i] + ": " + v + "</title></rect>";
+                });
+                const svgWrap = ntEl("div", null, "background:#0e1219;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:8px");
+                try {
+                    svgWrap.innerHTML = "<svg viewBox='0 0 " + W + " " + H + "' width='100%' height='64' role='img' aria-label='30-day activity sparkline'>" + bars + "</svg>";
+                    content.appendChild(svgWrap);
+                } catch (e) {
+                    // Trusted-Types page: numbers beat charts — render a text summary.
+                    const total = vals.reduce(function(a, b) { return a + b; }, 0);
+                    content.appendChild(ntEl("div", "Total over 30 days: " + total, "font-size:12px;color:#9ca3af"));
+                }
+            }
+
             const resetBtn = ntEl("button", "Reset statistics", "margin-top:14px;padding:8px 16px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#ef4444;font-size:12px;cursor:pointer");
             resetBtn.addEventListener("click", function() {
                 STATS.cleaned = STATS.fields = STATS.blocked = 0;
@@ -4426,9 +5540,84 @@
                 SV("statCleaned", 0);
                 SV("statFields", 0);
                 SV("statBlocked", 0);
+                SV("statDaily", {}); // v3.0.0: history hygiene included in reset
                 renderStats();
             });
             content.appendChild(resetBtn);
+        }
+
+        // v3.0.0 (#16 + #14) — Activity tab: explainability buffer, parameter
+        // classification, and user-promoted tracker candidates.
+        function renderActivity() {
+            content.appendChild(ntEl("div", "Recent Activity (this tab only — never saved, never uploaded)", "font-size:14px;font-weight:600;margin-bottom:8px"));
+            if (!_activity.length) {
+                content.appendChild(ntEl("div", "Nothing recorded yet on this page. Cleaned links, unwrapped redirects and consent actions will appear here with the exact rule that fired.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:6px"));
+            } else {
+                _activity.slice().reverse().forEach(function(a) {
+                    const row = ntEl("div", null, "padding:6px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:12px");
+                    const head = ntEl("div", null, "display:flex;justify-content:space-between");
+                    head.appendChild(ntEl("span", a.kind, "font-weight:600;color:#14b8a6"));
+                    head.appendChild(ntEl("span", new Date(a.t).toLocaleTimeString(), "color:#6b7280"));
+                    row.appendChild(head);
+                    row.appendChild(ntEl("div", a.text, "color:#dfe4ee;word-break:break-all"));
+                    if (a.rule) row.appendChild(ntEl("div", "rule: " + a.rule, "color:#6b7280;font-size:11px"));
+                    content.appendChild(row);
+                });
+            }
+
+            content.appendChild(ntEl("div", "Parameter Classification (this page)", "font-size:14px;font-weight:600;margin-top:18px;margin-bottom:8px"));
+            [ [ "Known trackers stripped", STATS.fields ],
+              [ "Known functional parameters seen", _clsFunctional ],
+              [ "Unknown parameters seen (left untouched, always)", _clsUnknown ] ].forEach(function(r) {
+                const row = ntEl("div", null, "display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.04)");
+                row.appendChild(ntEl("span", r[0], "font-size:13px;color:#9ca3af"));
+                row.appendChild(ntEl("span", String(r[1]), "font-size:13px;font-weight:600;color:#dfe4ee"));
+                content.appendChild(row);
+            });
+            content.appendChild(ntEl("div", "Unknown parameters are never stripped automatically — NullTrail only removes what the verified ruleset positively identifies as tracking. One broken website is worse than ten missed trackers.", "font-size:11px;color:#6b7280;line-height:1.5;margin-top:6px"));
+
+            // #14 candidates: entropy-scored suggestions the USER may promote.
+            content.appendChild(ntEl("div", "Tracker Candidates (review & optionally block)", "font-size:14px;font-weight:600;margin-top:18px;margin-bottom:8px"));
+            const candKeys = Object.keys(_candidates).sort(function(a, b) { return _candidates[b] - _candidates[a]; }).slice(0, 12);
+            if (!candKeys.length) {
+                content.appendChild(ntEl("div", "No suspicious high-entropy parameters spotted on this page.", "font-size:12px;color:#9ca3af;margin-bottom:6px"));
+            } else {
+                content.appendChild(ntEl("div", "These parameters carried long identifier-like values. If you recognize a tracker, block it — your personal rules apply on every site and survive rule updates.", "font-size:11px;color:#6b7280;line-height:1.5;margin-bottom:8px"));
+                candKeys.forEach(function(k) {
+                    const row = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.04)");
+                    const already = Array.isArray(CFG.userStripRules) && CFG.userStripRules.indexOf(k) !== -1;
+                    row.appendChild(ntEl("span", k + "  (seen " + _candidates[k] + "x)", "font-size:12px;color:#dfe4ee;font-family:monospace;word-break:break-all"));
+                    const btn = ntEl("button", already ? "Blocked" : "Block", "padding:5px 12px;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;background:" + (already ? "#374151;color:#9ca3af" : "#ef4444;color:#fff"));
+                    btn.disabled = already;
+                    btn.addEventListener("click", function() {
+                        if (!Array.isArray(CFG.userStripRules)) CFG.userStripRules = [];
+                        if (CFG.userStripRules.indexOf(k) === -1) {
+                            CFG.userStripRules.push(k);
+                            SV("userStripRules", CFG.userStripRules);
+                            rebuildRulesWithUserRules();
+                            renderActivity();
+                        }
+                    });
+                    row.appendChild(btn);
+                    content.appendChild(row);
+                });
+            }
+            if (Array.isArray(CFG.userStripRules) && CFG.userStripRules.length) {
+                content.appendChild(ntEl("div", "Your Personal Block Rules (" + CFG.userStripRules.length + ")", "font-size:14px;font-weight:600;margin-top:18px;margin-bottom:8px"));
+                CFG.userStripRules.slice().forEach(function(rule) {
+                    const row = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.04)");
+                    row.appendChild(ntEl("span", rule, "font-size:12px;font-family:monospace;color:#dfe4ee;word-break:break-all"));
+                    const btn = ntEl("button", "Remove", "padding:5px 12px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#ef4444;font-size:11px;cursor:pointer;flex-shrink:0;margin-left:8px");
+                    btn.addEventListener("click", function() {
+                        CFG.userStripRules = CFG.userStripRules.filter(function(r) { return r !== rule; });
+                        SV("userStripRules", CFG.userStripRules);
+                        rebuildRulesWithUserRules();
+                        renderActivity();
+                    });
+                    row.appendChild(btn);
+                    content.appendChild(row);
+                });
+            }
         }
 
         function renderRules() {
@@ -4444,6 +5633,7 @@
             const RESULT_LABELS = {
                 updated: [ "Fresh database installed", "#14b8a6" ],
                 current: [ "Already up to date", "#14b8a6" ],
+                staged: [ "Staged — activates after a 72h soak", "#f59e0b" ],
                 failed: [ "Failed — auto-retry scheduled", "#ef4444" ],
                 busy: [ "Check already in progress", "#f59e0b" ],
                 skipped: [ "Skipped (metered network / schedule)", "#f59e0b" ]
@@ -4468,6 +5658,68 @@
                 row.appendChild(ntEl("span", rl[0], "font-size:13px;font-weight:600;color:" + rl[1]));
                 content.appendChild(row);
             }
+
+            // v3.0.0 (#3) — canary failure banner: rules self-healed, user is told.
+            const canaryInfo = GV("rulesCanaryFail", null);
+            if (canaryInfo) {
+                let ci = null;
+                try { ci = typeof canaryInfo === "string" ? JSON.parse(canaryInfo) : canaryInfo; } catch (e) {}
+                if (ci) {
+                    content.appendChild(ntEl("div", "A bad ruleset (" + ci.source + ") was blocked by the self-test and " + (ci.recovery === "embedded" ? "built-in safe rules were restored" : "the previous good database was restored") + ". Your protection never ran on a corrupt database.", "font-size:12px;color:#f59e0b;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);border-radius:8px;padding:8px 10px;line-height:1.5;margin:10px 0"));
+                }
+            }
+
+            // v3.0.0 (#4) — staged rollout status + early activation.
+            const pending = GV("rulesPending", null);
+            if (pending && pending.data) {
+                const left = Math.max(0, (pending.activateAt | 0) - Date.now());
+                const hrs = Math.ceil(left / 3600000);
+                content.appendChild(ntEl("div", "A fresh database verified OK and is soaking" + (left > 0 ? " — activates automatically in ~" + hrs + "h" : " — ready to activate") + ".", "font-size:12px;color:#9ca3af;line-height:1.5;margin-top:8px"));
+                const actBtn = ntEl("button", left > 0 ? "Activate the staged database now" : "Activate the staged database", "margin-top:8px;width:100%;padding:9px;border:1px solid #14b8a6;border-radius:6px;background:transparent;color:#14b8a6;font-size:12px;font-weight:600;cursor:pointer");
+                actBtn.addEventListener("click", function() {
+                    actBtn.textContent = "Activating & self-testing…";
+                    actBtn.disabled = true;
+                    const res = maybeActivatePending(true);
+                    actBtn.textContent = res === "updated" ? "Activated & verified" : "Activation failed — safe rules kept";
+                    setTimeout(renderRules, 1200);
+                });
+                content.appendChild(actBtn);
+            }
+
+            // v3.0.0 (#21) — what changed in the last applied update.
+            const diff = GV("rulesDiff", null);
+            if (diff && typeof diff === "object") {
+                const dparts = [];
+                if (diff.addedProviders && diff.addedProviders.length) dparts.push("+" + diff.addedProviders.length + " cleaners (" + diff.addedProviders.slice(0, 3).join(", ") + (diff.addedProviders.length > 3 ? "…" : "") + ")");
+                if (diff.removedProviders && diff.removedProviders.length) dparts.push("-" + diff.removedProviders.length + " cleaners");
+                if (diff.addedRules) dparts.push("+" + diff.addedRules + " rules");
+                if (diff.removedRules) dparts.push("-" + diff.removedRules + " rules");
+                if (dparts.length) {
+                    content.appendChild(ntEl("div", "Last database change: " + dparts.join(", ") + ".", "font-size:11px;color:#6b7280;line-height:1.5;margin-top:8px"));
+                } else {
+                    content.appendChild(ntEl("div", "Last database change: structural refresh (rule contents unchanged).", "font-size:11px;color:#6b7280;line-height:1.5;margin-top:8px"));
+                }
+            }
+
+            // v3.0.0 (#6) — one-click rollback to previous-good database.
+            const prev = GV("rulesDataPrev", null);
+            if (prev && prev.data && prev.data.providers) {
+                const rbBtn = ntEl("button", "Restore previous database", "margin-top:10px;width:100%;padding:9px;border:1px solid rgba(255,255,255,.14);border-radius:6px;background:transparent;color:#dfe4ee;font-size:12px;cursor:pointer");
+                rbBtn.title = "Instantly reverts to the ruleset that was active before the last update — with self-test verification.";
+                rbBtn.addEventListener("click", function() {
+                    rbBtn.textContent = "Restoring…";
+                    rbBtn.disabled = true;
+                    lruClear();
+                    SV("rulesData", prev.data);
+                    if (prev.hash) SV("rulesHash", prev.hash);
+                    DV("rulesDataPrev");
+                    const okd = applyRulesVerified(prev.data, prev.hash || "", "manual rollback");
+                    rbBtn.textContent = okd ? "Previous database restored" : "Restore failed canary — safe rules kept";
+                    setTimeout(renderRules, 1200);
+                });
+                content.appendChild(rbBtn);
+            }
+
             content.appendChild(ntEl("div", "Userscript updates are handled automatically by your userscript manager (Tampermonkey/Violentmonkey) via the GitHub feed — no manual action needed.", "font-size:11px;color:#6b7280;line-height:1.5;margin-top:10px"));
             const updBtn = ntEl("button", "Check for updates now", "margin-top:14px;width:100%;padding:10px;border:none;border-radius:6px;background:#14b8a6;color:#fff;font-size:13px;font-weight:600;cursor:pointer");
             updBtn.addEventListener("click", function() {
@@ -4496,15 +5748,18 @@
         }
 
         function renderAbout() {
-            content.appendChild(ntEl("div", "NullTrail v2.6.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "NullTrail v3.0.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
             content.appendChild(ntEl("div", "An autonomous, zero-jargon browser privacy engine fusing advanced hyperlink scrubbing, tracking parameter deletion, fast-forward redirect unwrapping, and strict analytical API shielding.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:14px"));
             const features = [ 
                 "40+ Search Engine Redirect unwrapping & sanitization", 
                 "Comprehensive tracking query-parameter & anchor ping removal", 
                 "Strict, robust blocking of IP logging endpoints & web sockets", 
                 "Interception of background trackers and Google Analytics scripts", 
-                "Automatic, non-intrusive cookie consent banner rejection", 
-                "Dynamic memory-safe caching & high-speed MutationObservers", 
+                "Multilingual, precision-scored cookie consent rejection", 
+                "Self-testing rule updates with staged rollouts & 2-of-3 feed quorum", 
+                "Confidence-tiered cleaning — unknown parameters are never stripped", 
+                "Per-site dry-run, timed pause with auto-resume & site overrides", 
+                "Viewport-first cleaning with shadow-DOM & same-origin frame coverage", 
                 "Secure, sandboxed local storage to protect your whitelist" 
             ];
             content.appendChild(ntEl("div", "Core Safeguards", "font-size:11px;font-weight:700;text-transform:uppercase;color:#6b7280;margin-bottom:6px"));
@@ -4514,6 +5769,70 @@
             content.appendChild(ntEl("div", "Control Shortcuts", "font-size:11px;font-weight:700;text-transform:uppercase;color:#6b7280;margin:14px 0 6px"));
             content.appendChild(ntEl("div", "Alt + Shift + N  —  Toggle protection on current website", "font-size:12px;color:#dfe4ee;padding:3px 0"));
             content.appendChild(ntEl("div", "Alt + Shift + D  —  Open / Close this settings dashboard", "font-size:12px;color:#dfe4ee;padding:3px 0"));
+            content.appendChild(ntEl("div", "Alt + Shift + C  —  Copy a fully cleaned URL of this page", "font-size:12px;color:#dfe4ee;padding:3px 0"));
+
+            // v3.0.0 (#22) — one-click personas over the existing toggle matrix.
+            content.appendChild(ntEl("div", "Protection Personas", "font-size:11px;font-weight:700;text-transform:uppercase;color:#6b7280;margin:14px 0 6px"));
+            content.appendChild(ntEl("div", "Personas only flip switches you can also set individually — nothing hidden.", "font-size:11px;color:#6b7280;line-height:1.5;margin-bottom:6px"));
+            const pRow = ntEl("div", null, "display:flex;gap:6px;margin-bottom:10px");
+            [ [ "Gentle", "Maximum website compatibility — every risky feature off." ],
+              [ "Balanced", "The recommended default mix (as shipped)." ],
+              [ "Paranoid", "Everything on, including strict respawn blocking and frame cleaning. Ad-noise stays off unless you opt in." ] ].forEach(function(p) {
+                const b = ntEl("button", p[0], "flex:1;padding:8px 4px;border:1px solid rgba(255,255,255,.14);border-radius:6px;background:transparent;color:#dfe4ee;font-size:12px;font-weight:600;cursor:pointer");
+                b.title = p[1];
+                b.addEventListener("click", function() {
+                    applyPersona(p[0].toLowerCase());
+                    b.textContent = p[0] + " ✓";
+                    setTimeout(function() { b.textContent = p[0]; }, 1200);
+                });
+                pRow.appendChild(b);
+            });
+            content.appendChild(pRow);
+
+            // v3.0.0 (#23) — offline settings portability (files/clipboard only).
+            content.appendChild(ntEl("div", "Backup & Transfer", "font-size:11px;font-weight:700;text-transform:uppercase;color:#6b7280;margin:14px 0 6px"));
+            const bRow = ntEl("div", null, "display:flex;gap:6px;margin-bottom:6px");
+            const expBtn = ntEl("button", "Export settings", "flex:1;padding:8px 4px;border:1px solid rgba(255,255,255,.14);border-radius:6px;background:transparent;color:#dfe4ee;font-size:12px;cursor:pointer");
+            expBtn.title = "Downloads a JSON backup of your toggles, whitelist and site settings. Never leaves your device.";
+            expBtn.addEventListener("click", function() {
+                exportSettings();
+            });
+            const impBtn = ntEl("button", "Import settings", "flex:1;padding:8px 4px;border:1px solid rgba(255,255,255,.14);border-radius:6px;background:transparent;color:#dfe4ee;font-size:12px;cursor:pointer");
+            impBtn.title = "Restore a previously exported JSON backup (validated before anything is applied).";
+            impBtn.addEventListener("click", function() {
+                showImportBox();
+            });
+            bRow.appendChild(expBtn);
+            bRow.appendChild(impBtn);
+            content.appendChild(bRow);
+            const impTa = document.createElement("textarea");
+            impTa.placeholder = "Paste an exported NullTrail JSON backup here, then press Apply import";
+            ntStyle(impTa, "display:none;width:100%;min-height:90px;background:#0e1219;color:#dfe4ee;border:1px solid rgba(255,255,255,.08);border-radius:6px;padding:8px;font-size:11px;font-family:monospace;resize:vertical;outline:none;margin-bottom:6px");
+            content.appendChild(impTa);
+            const impApply = ntEl("button", "Apply import", "display:none;width:100%;padding:8px;border:none;border-radius:6px;background:#14b8a6;color:#fff;font-size:12px;font-weight:600;cursor:pointer");
+            impApply.addEventListener("click", function() {
+                const res = importSettings(impTa.value);
+                impApply.textContent = res;
+                setTimeout(function() {
+                    impApply.textContent = "Apply import";
+                }, 1800);
+            });
+            content.appendChild(impApply);
+            function showImportBox() {
+                impTa.style.display = "block";
+                impApply.style.display = "block";
+            }
+
+            // v3.0.0 (#30) — engine health (debug-gated perf counters).
+            content.appendChild(ntEl("div", "Engine Health", "font-size:11px;font-weight:700;text-transform:uppercase;color:#6b7280;margin:14px 0 6px"));
+            if (CFG.debug && _perf.cold.n + _perf.hit.n > 0) {
+                const cAvg = _perf.cold.n ? (_perf.cold.total / _perf.cold.n).toFixed(1) : "0";
+                const hAvg = _perf.hit.n ? (_perf.hit.total / _perf.hit.n).toFixed(2) : "0";
+                content.appendChild(ntEl("div", "Sanitize: cold avg " + cAvg + "µs (max " + _perf.cold.max.toFixed(0) + "µs, n=" + _perf.cold.n + ") · repeat avg " + hAvg + "µs (n=" + _perf.hit.n + ")", "font-size:11px;color:#9ca3af;line-height:1.5"));
+            } else {
+                content.appendChild(ntEl("div", "Enable “developer logs” to start collecting on-page performance counters.", "font-size:11px;color:#6b7280;line-height:1.5"));
+            }
+
             const resetBtn = ntEl("button", "Reset all settings to default", "margin-top:16px;padding:8px 16px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#ef4444;font-size:12px;cursor:pointer");
             resetBtn.addEventListener("click", function() {
                 // Hardening (v2.4.0): confirm/alert can throw in sandboxed frames.
@@ -4522,7 +5841,7 @@
                     agreed = window.confirm("Are you sure you want to reset all NullTrail settings, whitelist sites, and cached rule databases?");
                 } catch (e) {}
                 if (agreed) {
-                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "rulesLastCheck", "rulesLastResult", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation", "serverRedirectResolution", "respectMetered", "rulesNextTry" ].forEach(DV);
+                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "rulesLastCheck", "rulesLastResult", "statCleaned", "statFields", "statBlocked", "statDaily", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation", "serverRedirectResolution", "respectMetered", "rulesNextTry", "deepFrames", "stagedRules", "respawnStrict", "userStripRules", "siteProfiles", "dryRunSites", "pauseUntil", "ampCanonicalSites", "rulesDataPrev", "rulesPending", "rulesDiff", "rulesCanaryFail" ].forEach(DV);
                     try { window.alert("Settings successfully reset. Please reload the webpage."); } catch (e) {}
                     closeDash();
                 }
@@ -4552,6 +5871,49 @@
         return false;
     }
 
+    // v3.0.0 (#20) — copy a fully sanitized URL of the current page.
+    function copyCleanPageURL() {
+        try {
+            const eng = getEngine(location.hostname);
+            let url = location.href;
+            if (eng && eng.s) {
+                try {
+                    const u = new URL(url);
+                    if (stripEngineSearchParams(u, eng)) url = u.toString();
+                } catch (e) {}
+            }
+            url = sanitizeHref(url);
+            const done = function(okd) {
+                // Transient HUD confirmation (shown even if HUD is off).
+                try {
+                    const wasOn = CFG.showHUD;
+                    CFG.showHUD = true;
+                    _pageCount = _pageCount; // no-op, display untouched below
+                    updateHUD();
+                    if (_hudEl) _hudEl.textContent = okd ? "Clean URL copied to clipboard" : "Copy failed — clean URL logged to console";
+                    setTimeout(function() {
+                        CFG.showHUD = wasOn;
+                        updateHUD();
+                    }, 1400);
+                } catch (e) {}
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(url).then(() => done(true), () => done(false));
+            } else {
+                const ta = document.createElement("textarea");
+                ta.value = url;
+                ta.style.cssText = "position:fixed;opacity:0";
+                (document.body || document.documentElement).appendChild(ta);
+                ta.select();
+                let okd = false;
+                try { okd = document.execCommand("copy"); } catch (e) {}
+                ta.remove();
+                done(okd);
+            }
+            recordActivity("copied clean page URL", url, "shortcut");
+        } catch (e) {}
+    }
+
     document.addEventListener("keydown", function(e) {
         if (isEditableTarget(e.target)) return;
         if (e.altKey && e.shiftKey && (e.key === "N" || e.key === "n" || e.code === "KeyN")) {
@@ -4565,6 +5927,12 @@
             e.preventDefault();
             e.stopPropagation();
             openDashboard();
+        }
+        // v3.0.0 (#20): Alt+Shift+C copies a sanitized URL of this page.
+        if (e.altKey && e.shiftKey && (e.key === "C" || e.key === "c" || e.code === "KeyC")) {
+            e.preventDefault();
+            e.stopPropagation();
+            copyCleanPageURL();
         }
     }, true);
 
@@ -4590,9 +5958,17 @@
     }
 
     const cached = GV("rulesData", null);
-    if (cached && typeof cached === "object" && cached.providers) setRules(cached); 
-    else setRules(EMBEDDED_RULES);
-    
+    // v3.0.0 (#3): the cached ruleset must pass the boot canary — a corrupt or
+    // tampered cache self-heals to previous-good/embedded instead of running
+    // with broken matchers.
+    if (cached && typeof cached === "object" && cached.providers) {
+        applyRulesVerified(cached, String(GV("rulesHash", "")), "cached");
+    } else {
+        setRules(EMBEDDED_RULES);
+    }
+    // v3.0.0 (#4): activate a staged ruleset whose 72h soak has elapsed.
+    maybeActivatePending(false);
+
     pushConfigToPage();
     getNonce();
     injectMainWorld();
@@ -4616,6 +5992,7 @@
             purgeTrackerStorage();
             applyPrivacyPresets();
             blockIPLoggerNav();
+            ensureAMPCanonical(); // v3.0.0 (#15)
             scanDom();
             scanSpecial();
             scanAndClickAds();
@@ -4632,6 +6009,7 @@
         purgeTrackerStorage();
         applyPrivacyPresets();
         blockIPLoggerNav();
+        ensureAMPCanonical(); // v3.0.0 (#15)
         scanDom();
         scanSpecial();
         scanAndClickAds();
@@ -4684,5 +6062,5 @@
     setTimeout(function() { updateRules(false); }, 3000);
     setInterval(function() { updateRules(false); }, 6 * 3600 * 1000);
 
-    log("NullTrail v2.6.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
+    log("NullTrail v3.0.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
 })();
