@@ -56,6 +56,31 @@ function makeClickable(href) {
 }
 
 const listeners = [];
+// Consent auto-reject fixtures (Test 8): a dangerous generic match (article link
+// whose href contains "reject") vs. a genuine cookie-decline button.
+const _consentFixture = { malEl: null, goodEl: null };
+function buildConsentFixtures() {
+    const articleSection = makeEl("section");
+    articleSection.attrs["class"] = "article-body";
+    const mal = makeClickable("https://example.com/news/mayor-rejects-budget");
+    mal.textContent = "Mayor rejects budget";
+    mal.parentElement = articleSection;
+    mal.offsetParent = articleSection;
+    mal.click = function () { this.clicked = (this.clicked || 0) + 1; };
+
+    const banner = makeEl("div");
+    banner.id = "cookie-consent";
+    const good = makeEl("button");
+    good.attrs["class"] = "opt-out";
+    good.textContent = "Reject all cookies";
+    good.parentElement = banner;
+    good.offsetParent = banner;
+    good.click = function () { this.clicked = (this.clicked || 0) + 1; };
+
+    _consentFixture.malEl = mal;
+    _consentFixture.goodEl = good;
+}
+
 const documentStub = {
     readyState: "complete",
     cookie: "",
@@ -67,9 +92,13 @@ const documentStub = {
     createElement(tag) { return makeEl(tag); },
     getElementById() { return null; },
     querySelector() { return null; },
-    querySelectorAll() { return []; },
+    querySelectorAll(sel) {
+        if (sel === "a[href*=reject i], button[class*=opt-out i]") return [ _consentFixture.malEl, _consentFixture.goodEl ];
+        return [];
+    },
     dispatchEvent() { return true; }
 };
+buildConsentFixtures();
 
 const locationStub = {
     hostname: "example.com",
@@ -284,6 +313,15 @@ async function main() {
     obs.cb([ { type: "childList", addedNodes: [ a8 ] } ]);
     await new Promise(r => setTimeout(r, 150)); // fallback scheduler runs at ~40ms
     ok(a8.href === "https://example.org/landing?id=9", "queued anchor cleaned via fallback budget (got: " + a8.href + ")");
+
+    // -----------------------------------------------------------------------
+    // Test 8: consent auto-reject precision gate (boot runs it synchronously;
+    // also fires at +1s — verify no double-click and zero false positives)
+    // -----------------------------------------------------------------------
+    console.log("\n== Test 8: consent precision ==");
+    await new Promise(r => setTimeout(r, 1300));
+    ok((_consentFixture.goodEl.clicked || 0) === 1, "genuine decline button clicked once (got: " + (_consentFixture.goodEl.clicked || 0) + ")");
+    ok((_consentFixture.malEl.clicked || 0) === 0, "article link containing 'reject' NEVER auto-clicked (got: " + (_consentFixture.malEl.clicked || 0) + ")");
 
     console.log("\n== Summary ==");
     if (failures.length) {

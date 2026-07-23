@@ -1,7 +1,7 @@
 # NullTrail — Universal Tracking & Redirect Scrubber
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.4.0-teal.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.5.0-teal.svg)]()
 [![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)]()
 
 **NullTrail** is an autonomous, high-performance browser privacy engine designed to make your web surfing clean, fast, and secure. 
@@ -22,7 +22,7 @@ Automatically resolves and bypasses intermediate tracking links (like search eng
 Hard-blocks known IP-logging and location-tracking services across standard web protocols, including images, background fetch/XHR, beacon telemetry, and WebSockets.
 
 ### 🍪 Automated Cookie Banner Rejection
-Tired of pop-ups? NullTrail automatically detects cookie consent dialogues and clicks "Decline" or "Reject All" on your behalf, so you can surf undisturbed.
+Tired of pop-ups? NullTrail automatically detects cookie consent dialogues and clicks "Decline" or "Reject All" on your behalf — so you can surf undisturbed. It's precision-gated, so it only ever clicks genuine consent choices inside actual consent banners, never ordinary links that happen to contain words like "reject".
 
 ### ⚙️ Targeted Site-Specific Shields (On-Demand)
 Websites often block standard right-clicks (context menus) or disable text copying. NullTrail includes **Target-Smart unblockers** that can be activated via the dashboard for specific sites:
@@ -57,6 +57,7 @@ Take control of your privacy with simple keyboard shortcuts anywhere on the web:
 
 * **`Alt + Shift + D`**: Open or close the interactive **NullTrail Dashboard** to adjust settings (or press **`Esc`** to close it).
 * **`Alt + Shift + N`**: Quick-toggle protection state (Enable/Disable) on the current website — takes effect instantly, across content and network protection layers.
+* *Shortcuts never fire while you're typing in a text field — they'll never interrupt your flow.*
 
 ---
 

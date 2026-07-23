@@ -2,6 +2,43 @@
 
 All notable changes to NullTrail are documented in this file.
 
+## [2.5.0] — 2026-07-23
+
+**Theme: second 10-pass hardening round** — fresh themes per pass (regex safety,
+leak audit, consent precision, persistence, cookie ops, UX safety). Full ledger
+in [AUDIT.md](AUDIT.md) (Round 2).
+
+### Fixed
+- **Consent auto-reject could navigate you away**: the generic
+  `a[href*=reject]` selector matched ordinary article URLs containing "reject"
+  (e.g. `/news/governor-rejects-budget`) and auto-clicked them. Consent
+  selectors are now split trusted/generic — generic matches require BOTH a
+  consent-scoped ancestor AND reject-style wording in the element itself.
+  Regression-tested against the malicious fixture.
+- **Cross-tab statistics clobbering**: flushes now delta-merge into storage
+  instead of writing absolute counters; flush window shortened 4s → 1.5s (less
+  loss on tab close); pending deltas cleared on manual reset.
+- **`ysmm` shim detectability**: getter returned the string `"undefined"`;
+  adfly-style `typeof` checks could detect it. Now returns real `undefined`.
+- **GA cookie purge missed parent-domain cookies**: hostname is walked upward;
+  browsers reject public suffixes safely, so no suffix list is required.
+- **Keyboard shortcuts hijacked typing**: Alt+Shift+D/N are ignored inside
+  inputs, textareas, selects, and contenteditable regions.
+
+### Improved / hardened
+- Consent clicks now skip disabled and invisible elements.
+- Blocked-XHR mock responses complete (`statusText`, `responseURL`).
+- Rule-regex concatenation memoized (no per-URL array allocation when referral
+  stripping is enabled).
+- Preset cookies carry `;Secure` on HTTPS origins.
+- Verified, no change needed: all heavy regexes ReDoS-free (worst 50-batch
+  0.37ms), every listener/timer/weak-collection bounded, dashboard state sync.
+
+### Update checker status
+Re-verified end to end: `@updateURL`/`@downloadURL` canonical and CI-enforced;
+rule updater metered-gated, hash-gated, payload-validated, 20s-timed-out, with
+persisted 6h–24h failure backoff.
+
 ## [2.4.0] — 2026-07-23
 
 **Theme: 10-pass production-hardening audit.** A structured hunt across every
