@@ -33,7 +33,14 @@ jobs:
           for c in bing google duckduckgo; do
             NT_CASE=$c node tests/smoke-engines.js
           done
-          echo "✓ All regression tests passed!"
+          echo "✓ Core regression tests passed!"
+
+      - name: Run Regression Harness (network friendliness)
+        run: |
+          NT_METERED=1 NT_ADNOISE=1 node tests/smoke-network.js
+          NT_ADNOISE=1 node tests/smoke-network.js
+          NT_METERED=1 NT_ADNOISE=1 NT_NORESPECT=1 node tests/smoke-network.js
+          echo "✓ Network-friendliness tests passed!"
 
       - name: Verify Userscript Metadata Headers
         run: |

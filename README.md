@@ -1,7 +1,7 @@
 # NullTrail — Universal Tracking & Redirect Scrubber
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.2.0-teal.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.3.0-teal.svg)]()
 [![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)]()
 
 **NullTrail** is an autonomous, high-performance browser privacy engine designed to make your web surfing clean, fast, and secure. 
@@ -30,8 +30,14 @@ Websites often block standard right-clicks (context menus) or disable text copyi
 * **Enable Text Copying:** Dynamically removes selection restrictions only on the text path you interact with, keeping the rest of the site UI and style fully intact.
 * *Note: These features are disabled by default and only turn on where you explicitly request them.*
 
+### 📉 Metered-Network Friendly — Zero Speculative Traffic
+NullTrail never opens speculative connections: **no dns-prefetch, no preconnect, no prefetch — hovering a link costs exactly zero bytes.** All remaining background traffic is deliberate, capped, and paused automatically when your browser reports a metered connection or Data-Saver mode:
+* **Rule updates** (~6-day cadence, only when changed) are skipped on metered links, unreachable servers back off gently (6h → 24h), and every feed payload is hash-verified and schema-validated before use.
+* **Optional features that consume data** (server-side redirect resolution, AdNauseam-style noise) are opt-in, hover-gated, per-page capped, and metered-paused.
+* Prefer full background access on a metered plan? Flip **"Save Mobile Data"** off in the dashboard.
+
 ### 🌐 Optional Server-Side Redirect Resolution (Opt-In)
-For links that hide their destination behind a pure server-side redirect (no URL parameter to unwrap), NullTrail can resolve them on hover using anonymous, cookie-less background requests. Because this contacts the redirect server, it is **disabled by default** and can be enabled from the dashboard ("Resolve Server-Side Redirects").
+For links that hide their destination behind a pure server-side redirect (no URL parameter to unwrap), NullTrail can resolve them on hover using anonymous, cookie-less background requests. Because this contacts the redirect server, it is **disabled by default**, pause automatically on metered connections, and capped per page — enable it from the dashboard ("Resolve Server Redirects").
 
 ---
 
@@ -57,6 +63,7 @@ Take control of your privacy with simple keyboard shortcuts anywhere on the web:
 ## 🔒 Built with Privacy in Mind
 
 * **100% Sandboxed & Local:** NullTrail operates entirely inside your browser. Your Whitelist and custom settings never leave your machine.
+* **Zero Speculative Connections:** No prefetching, no preconnecting, no hover pinging — your bandwidth and your browsing intentions stay yours.
 * **No Local Storage Abuse:** Unlike other scripts, NullTrail does not write massive databases to website local storage, preventing websites from tracking your preferences or hitting storage quotas.
 * **CSP & Trusted Types Compliant:** Built to respect and comply with modern browser security policies (such as Content Security Policy and Trusted Types), ensuring zero browser errors.
 

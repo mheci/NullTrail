@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NullTrail — Universal Tracking & Redirect Scrubber
 // @namespace    https://github.com/nulltrail
-// @version      2.2.0
+// @version      2.3.0
 // @description  Fix the web.
 // @license      Unlicense
 // @author       NullTrail
@@ -1067,8 +1067,32 @@
         // Disabled by default: resolving server-side redirects on hover requires
         // firing background requests at third-party servers, which leaks hover
         // intent. Users who want FastForward-style multi-hop resolution can opt in.
-        serverRedirectResolution: GV("serverRedirectResolution", false)
+        serverRedirectResolution: GV("serverRedirectResolution", false),
+        // When true (default), all optional background traffic (scheduled rule
+        // downloads, hover redirect resolution, ad-noise clicks) is paused while
+        // the browser reports a metered connection or Data-Saver mode.
+        respectMetered: GV("respectMetered", true)
     };
+
+    // ------------------------------------------------------------------
+    // Network-condition awareness (v2.3.0)
+    // The Network Information API is Chromium-only; on Firefox/LibreWolf the
+    // API is absent, so detection simply reports "unknown" — and because every
+    // heavy feature below is already opt-in or metered-gated, that failure mode
+    // stays bandwidth-friendly by default.
+    // ------------------------------------------------------------------
+    function isMeteredConnection() {
+        try {
+            const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+            if (c && (c.saveData === true || c.metered === true)) return true;
+        } catch (e) {}
+        return false;
+    }
+
+    // Single policy checkpoint for ALL optional background network traffic.
+    function backgroundDataAllowed() {
+        return !CFG.respectMetered || !isMeteredConnection();
+    }
 
     let WHITELIST = GV("whitelist", "");
 
@@ -1573,6 +1597,11 @@
     }
 
     let _updatingRules = false;
+    // Consecutive failures of *scheduled* updates — drives a capped exponential
+    // backoff persisted via "rulesNextTry", so devices on flaky/expensive links
+    // are not re-pounded on every page load (the 6-day cadence stays untouched
+    // on healthy connections).
+    let _ruleFailCount = 0;
 
     function updateRules(force) {
         if (!CFG.autoUpdateRules && !force) return Promise.resolve();
@@ -1580,15 +1609,23 @@
         // could otherwise run duplicate parallel downloads of the same ~200KB feed.
         if (_updatingRules) return Promise.resolve();
         if (!force) {
+            // Metered-friendly (v2.3.0): scheduled updates are skipped entirely on
+            // metered / Data-Saver connections. A manual "Check for updates now"
+            // (force) is user intent and always allowed.
+            if (!backgroundDataAllowed()) {
+                log("rule auto-update skipped: metered / data-saver connection");
+                return Promise.resolve();
+            }
             const last = GV("rulesUpdated", 0) | 0;
             if (last && Date.now() - last < UPDATE_INTERVAL) return Promise.resolve();
+            const nextTry = GV("rulesNextTry", 0) | 0;
+            if (nextTry && Date.now() < nextTry) return Promise.resolve();
         }
         _updatingRules = true;
         return firstOK(HASH_URLS).then(hr => {
             const remoteHash = (hr.text || "").trim().toLowerCase();
             // Bandwidth fix (v2.2.0): if the remote hash matches our cached rules we
-            // can skip downloading the full ~200KB data file entirely. The old code
-            // always downloaded it and only verified the fresh copy.
+            // can skip downloading the full ~200KB data file entirely.
             const cachedHash = String(GV("rulesHash", "")).toLowerCase();
             if (remoteHash && cachedHash === remoteHash && GV("rulesData", null)) {
                 SV("rulesUpdated", Date.now());
@@ -1628,12 +1665,17 @@
                 }
                 return accept(null);
             });
-        }).catch(e => {
-            log("rule update failed:", e && e.message);
         }).then(() => {
+            _ruleFailCount = 0;
+            if (GV("rulesNextTry", 0) | 0) SV("rulesNextTry", 0);
             _updatingRules = false;
-        }, () => {
+        }, e => {
+            _ruleFailCount++;
+            // Capped exponential backoff: 6h → 12h → 24h (max), persisted.
+            const backoff = Math.min(6 * 3600 * 1000 * Math.pow(2, Math.min(_ruleFailCount - 1, 2)), 24 * 3600 * 1000);
+            SV("rulesNextTry", Date.now() + backoff);
             _updatingRules = false;
+            log("rule update failed:", e && e.message, "— retry paused for", Math.round(backoff / 360000) / 10, "h");
         });
     }
 
@@ -3331,35 +3373,12 @@
         return el;
     }
 
-    // JIT Speculative dns-prefetch & preconnect on mouse hover to speed up clicks by 300ms
-    // Perf Fix (v2.2.0): the old implementation appended two <link> nodes on EVERY
-    // hover of ANY anchor — unbounded DOM growth in <head> during long sessions, and
-    // repeated (ignored) preconnects. We now warm each origin at most once, skip the
-    // current origin (already connected), and cap the cache. crossOrigin="anonymous"
-    // was also dropped: navigations use credentialed sockets, so anonymous-pool
-    // preconnects were never reused for the actual click.
-    const _warmedOrigins = new Set();
-    function warmupTargetServer(url) {
-        try {
-            const u = new URL(url);
-            const origin = u.origin;
-            if (origin === location.origin) return;
-            if (_warmedOrigins.has(origin)) return;
-            if (_warmedOrigins.size >= 64) return;
-            _warmedOrigins.add(origin);
-            if (!document.head) return;
-
-            const dns = document.createElement("link");
-            dns.rel = "dns-prefetch";
-            dns.href = origin;
-            document.head.appendChild(dns);
-
-            const conn = document.createElement("link");
-            conn.rel = "preconnect";
-            conn.href = origin;
-            document.head.appendChild(conn);
-        } catch (e) {}
-    }
+    // NOTE (v2.3.0): the speculative hover warmup (dns-prefetch + preconnect) was
+    // REMOVED, not just optimized. Any connection opened before the user actually
+    // clicks is wasted bandwidth on links they never visit — unacceptable on
+    // metered/limited networks. NullTrail now guarantees ZERO speculative traffic:
+    // bytes only flow after a deliberate user action (click, or an explicit opt-in
+    // feature below).
 
     // Advanced Multi-Hop Redirect Resolver (Server-Side Bypassing via GM HEAD checks)
     // Bug Fix (v2.2.0): the original implementation was triple-broken —
@@ -3372,14 +3391,22 @@
     // response.finalUrl, and parses responseHeaders correctly as a fallback.
     const RESOLVED_MAP = new WeakMap();
     const REDIRECT_HINT_RE = /(?:[?&](?:url|u|q|dest|target|to|redir)=|\/(?:ck|redirect|go|out|away|l)\b)/i;
+    // Hard per-page budget so even an opted-in user on an infinite SERP can't
+    // generate unbounded hover traffic.
+    const BG_RESOLVE_PAGE_CAP = 25;
+    let _bgResolveCount = 0;
     function preResolveServerRedirect(el) {
         if (!CFG.serverRedirectResolution) return;
+        // Metered gate (v2.3.0): never spend hover traffic on metered/data-saver links.
+        if (!backgroundDataAllowed()) return;
         if (typeof GM_xmlhttpRequest !== "function") return;
         if (!el || !el.href || RESOLVED_MAP.has(el) || el._nt_resolving) return;
+        if (_bgResolveCount >= BG_RESOLVE_PAGE_CAP) return;
         // Precision gate: only hover-resolve links that still LOOK like redirect
         // wrappers. Plain destination links were already unwrapped by cleanAnchor;
         // HEAD-requesting them would leak hover intent to every site on the SERP.
         if (!REDIRECT_HINT_RE.test(el.href)) return;
+        _bgResolveCount++;
         el._nt_resolving = true;
 
         GM_xmlhttpRequest({
@@ -3417,7 +3444,9 @@
     let _bgClicksCount = 0;
 
     function simulateAdClick(url) {
-        if (!CFG.activeAdObfuscation || _bgClicksCount >= 5) return;
+        // Metered gate (v2.3.0): this feature deliberately generates NOISE traffic,
+        // so it must yield to metered/data-saver connections even when opted in.
+        if (!CFG.activeAdObfuscation || _bgClicksCount >= 5 || !backgroundDataAllowed()) return;
         try {
             const parsed = new URL(url, location.href);
             const cleanUrl = parsed.origin + parsed.pathname + parsed.search;
@@ -3461,7 +3490,7 @@
     }
 
     function scanAndClickAds() {
-        if (!CFG.activeAdObfuscation || _bgClicksCount >= 5) return;
+        if (!CFG.activeAdObfuscation || _bgClicksCount >= 5 || !backgroundDataAllowed()) return;
         try {
             const anchors = document.querySelectorAll("a[href]");
             for (let i = 0; i < anchors.length; i++) {
@@ -3765,18 +3794,16 @@
         }
     }, true);
 
-    // Hover features (DNS preconnect + Server-side multi-hop resolution)
+    // Hover-activated server-side redirect resolution (opt-in; gated).
+    // v2.3.0: the speculative connection warmup was removed — hovering now costs
+    // exactly zero bytes unless the user explicitly opted into redirect resolution.
+    // Cheap boolean checks run before any DOM traversal.
     document.addEventListener("mouseover", function(e) {
+        if (!CFG.serverRedirectResolution) return;
+        if (!isEngineHost(location.hostname)) return;
         const el = findAnchor(e.target);
         if (!el || !el.href) return;
-        
-        // 1. Warm up destination connection
-        warmupTargetServer(el.href);
-        
-        // 2. Resolve nested tracking redirects on search results using background HEAD
-        if (isEngineHost(location.hostname)) {
-            preResolveServerRedirect(el);
-        }
+        preResolveServerRedirect(el);
     }, { passive: true });
 
     document.addEventListener("dragstart", function(e) {
@@ -3853,48 +3880,74 @@
     // No-Jargon configuration groups for seamless and intuitive user friendly dashboard!
     const DASH_CFG_GROUPS = [ {
         title: "Privacy and Tracking Protection",
-        items: [ 
-            [ "globalStatus", "Enable Privacy Protection" ], 
-            [ "forceNoReferrer", "Hide Where I Came From (Referrer)" ], 
-            [ "noping", "Block Link Click Auditing & Beacons" ], 
-            [ "relNoReferrer", "Secure Multi-tab Browsing" ], 
-            [ "stripSERPParams", "Clean Search Engine Result Links" ], 
-            [ "referralMarketing", "Allow Support For Creator Affiliate Links" ] 
+        items: [
+            [ "globalStatus", "Enable Privacy Protection" ],
+            [ "forceNoReferrer", "Hide Where I Came From (Referrer)" ],
+            [ "noping", "Block Link Click Auditing & Beacons" ],
+            [ "relNoReferrer", "Secure Multi-tab Browsing" ],
+            [ "stripSERPParams", "Clean Search Engine Result Links" ],
+            [ "referralMarketing", "Allow Support For Creator Affiliate Links" ]
         ]
     }, {
         title: "Content & Behavioral Blocking",
-        items: [ 
-            [ "blockGA", "Block Web Analytics & Tracking Beacons" ], 
-            [ "blockPrivacySandbox", "Block Google Ad Interest Tracking" ], 
-            [ "blockKeepalive", "Block Background Connection Tracking" ], 
-            [ "blockIPLoggers", "Block Suspicious Location Trackers" ], 
+        items: [
+            [ "blockGA", "Block Web Analytics & Tracking Beacons" ],
+            [ "blockPrivacySandbox", "Block Google Ad Interest Tracking" ],
+            [ "blockKeepalive", "Block Background Connection Tracking" ],
+            [ "blockIPLoggers", "Block Suspicious Location Trackers" ],
             [ "blockBounceRedirect", "Skip Middleman Link Redirects" ],
-            [ "serverRedirectResolution", "Resolve Server-Side Redirects (sends anonymous hover requests)" ] 
+            [ "serverRedirectResolution", "Resolve Server Redirects (hover; uses a little data)" ]
         ]
     }, {
         title: "Browser Cleanup",
-        items: [ 
-            [ "purgeGACookies", "Clear Search Analytics Cookies" ], 
-            [ "purgeStorage", "Clear Hidden Website Trackers" ] 
+        items: [
+            [ "purgeGACookies", "Clear Search Analytics Cookies" ],
+            [ "purgeStorage", "Clear Hidden Website Trackers" ]
         ]
     }, {
         title: "Active Profile Obfuscation",
-        items: [ 
-            [ "activeAdObfuscation", "Generate Bogus Ad Clicks (AdNauseam-Style)" ] 
+        items: [
+            [ "activeAdObfuscation", "Generate Bogus Ad Clicks (uses extra data)" ]
         ]
     }, {
         title: "Privacy Settings Presets",
-        items: [ 
-            [ "enforcePrivacyPresets", "Enforce Maximum Shielding automatically" ] 
+        items: [
+            [ "enforcePrivacyPresets", "Enforce Maximum Shielding automatically" ]
         ]
     }, {
         title: "Advanced Maintenance",
-        items: [ 
-            [ "autoUpdateRules", "Auto-update database rules silently" ], 
-            [ "showHUD", "Display counter on web pages" ], 
-            [ "debug", "Enable developer logs" ] 
+        items: [
+            [ "respectMetered", "Save Mobile Data (metered-network friendly)" ],
+            [ "autoUpdateRules", "Auto-update cleaning rules (paused on metered)" ],
+            [ "showHUD", "Display counter on web pages" ],
+            [ "debug", "Enable developer logs" ]
         ]
     } ];
+
+    // Plain-language explanations shown as hover tooltips on every toggle (v2.3.0):
+    // friendlier UX — nobody should have to guess what a privacy switch does.
+    const TOGGLE_HINTS = {
+        globalStatus: "Master switch for every NullTrail protection.",
+        forceNoReferrer: "Sites you visit won't see which page you came from.",
+        noping: "Stops sites from silently logging your clicks through 'ping' beacons.",
+        relNoReferrer: "Adds rel=noopener to new-tab links so destinations can't script your tab.",
+        stripSERPParams: "Removes tracking junk from search engine URLs and result links.",
+        referralMarketing: "When ON, keeps creator affiliate tags (ref=, tag=) so creators still get credit.",
+        blockGA: "Blocks Google Analytics endpoints while browsing Google properties.",
+        blockPrivacySandbox: "Disables Chromium's built-in ad-interest APIs (Topics, FLEDGE).",
+        blockKeepalive: "Prevents quiet background keep-alive requests used for tracking.",
+        blockIPLoggers: "Blocks known IP/location grabber domains everywhere (links, images, sockets).",
+        blockBounceRedirect: "Skips hop-through trackers (t.co, bit.ly…) during navigations.",
+        serverRedirectResolution: "Optional: resolves hidden redirect chains when you hover a result, using anonymous requests. Paused on metered networks.",
+        purgeGACookies: "Deletes Google Analytics cookies already stored in this browser.",
+        purgeStorage: "Removes known tracker identifiers from the site's local storage.",
+        activeAdObfuscation: "Optional (AdNauseam-style): sends fake ad clicks to pollute advertising profiles. Consumes extra data; paused on metered networks.",
+        enforcePrivacyPresets: "Automatically sets privacy-preserving cookies on supported sites.",
+        respectMetered: "Pauses every optional background download while your connection is metered or your system/browser Data-Saver is enabled.",
+        autoUpdateRules: "Downloads updated cleaning rules about every 6 days. Skipped on metered networks; failed attempts back off gently.",
+        showHUD: "Shows a small on-page counter of links NullTrail has cleaned.",
+        debug: "Writes verbose diagnostic logs to the browser console."
+    };
 
     function openDashboard() {
         const existing = document.getElementById("nt-dashboard-root");
@@ -3915,7 +3968,7 @@
         const hdr = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06)");
         const hdrLeft = ntEl("div", null, "display:flex;flex-direction:column");
         hdrLeft.appendChild(ntEl("span", "NullTrail", "font-size:17px;font-weight:700;color:#14b8a6"));
-        hdrLeft.appendChild(ntEl("span", "v2.2.0", "font-size:11px;color:#6b7280;margin-top:2px"));
+        hdrLeft.appendChild(ntEl("span", "v2.3.0", "font-size:11px;color:#6b7280;margin-top:2px"));
         hdr.appendChild(hdrLeft);
         const closeBtn = ntEl("button", "x", "background:none;border:none;color:#9ca3af;font-size:22px;cursor:pointer;padding:0 4px;line-height:1");
         closeBtn.title = "Close";
@@ -3958,7 +4011,10 @@
 
         function makeToggle(key, label) {
             const row = ntEl("label", null, "display:flex;align-items:center;justify-content:space-between;padding:8px 0;cursor:pointer;font-size:13px;color:#dfe4ee");
-            row.appendChild(ntEl("span", label));
+            if (TOGGLE_HINTS[key]) row.title = TOGGLE_HINTS[key];
+            const lbl = ntEl("span", label);
+            if (TOGGLE_HINTS[key]) lbl.title = TOGGLE_HINTS[key];
+            row.appendChild(lbl);
             const cb = document.createElement("input");
             cb.type = "checkbox";
             cb.checked = !!CFG[key];
@@ -3979,6 +4035,9 @@
         }
 
         function renderSettings() {
+            // Friendlier UX (v2.3.0): reassure users up front — everything is local,
+            // and hover any setting for a plain-language explanation.
+            content.appendChild(ntEl("div", "All processing happens locally on your device — nothing is ever uploaded. Hover any option for a plain-language explanation.", "font-size:11px;color:#6b7280;line-height:1.5;margin-bottom:4px"));
             DASH_CFG_GROUPS.forEach(grp => {
                 content.appendChild(ntEl("div", grp.title, "font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#6b7280;margin:14px 0 4px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,.04)"));
                 grp.items.forEach(it => {
@@ -4071,7 +4130,9 @@
                 [ "Database Cleaners Active", PROVIDERS.length ], 
                 [ "Engine Scrapers Configured", ENGINES.length ], 
                 [ "Bypass Handlers Loaded", DOMAIN_REDIRECTS.length ], 
-                [ "Current Engine", eng ? eng.n : "Generic / Agnostic" ] 
+                [ "Current Engine", eng ? eng.n : "Generic / Agnostic" ],
+                [ "Metered / Data-Saver Connection", isMeteredConnection() ? "Detected" : "Not detected" ],
+                [ "Optional Background Downloads", backgroundDataAllowed() ? "Allowed" : "Paused (saving your data)" ]
             ];
             rows.forEach(r => {
                 const row = ntEl("div", null, "display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.04)");
@@ -4129,7 +4190,7 @@
         }
 
         function renderAbout() {
-            content.appendChild(ntEl("div", "NullTrail v2.2.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "NullTrail v2.3.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
             content.appendChild(ntEl("div", "An autonomous, zero-jargon browser privacy engine fusing advanced hyperlink scrubbing, tracking parameter deletion, fast-forward redirect unwrapping, and strict analytical API shielding.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:14px"));
             const features = [ 
                 "40+ Search Engine Redirect unwrapping & sanitization", 
@@ -4150,7 +4211,7 @@
             const resetBtn = ntEl("button", "Reset all settings to default", "margin-top:16px;padding:8px 16px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#ef4444;font-size:12px;cursor:pointer");
             resetBtn.addEventListener("click", function() {
                 if (confirm("Are you sure you want to reset all NullTrail settings, whitelist sites, and cached rule databases?")) {
-                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation", "serverRedirectResolution" ].forEach(DV);
+                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation", "serverRedirectResolution", "respectMetered", "rulesNextTry" ].forEach(DV);
                     alert("Settings successfully reset. Please reload the webpage.");
                     container.remove();
                 }
@@ -4295,5 +4356,5 @@
     setTimeout(function() { updateRules(false); }, 3000);
     setInterval(function() { updateRules(false); }, 6 * 3600 * 1000);
 
-    log("NullTrail v2.2.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
+    log("NullTrail v2.3.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
 })();

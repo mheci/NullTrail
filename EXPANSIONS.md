@@ -76,6 +76,14 @@ function preResolveServerRedirect(el) {
 
 ## ⚡ 3. Predictive DNS Prefetch & preconnect Warmup
 
+> **❌ STATUS: DELIBERATELY REJECTED (v2.3.0).** This feature was implemented
+> and then *removed on principle*: speculative connections waste bandwidth on
+> links the user never visits — unacceptable on metered/limited networks — and
+> they leak hover intent to third parties. NullTrail policy is now **zero
+> speculative traffic**: bytes flow only after deliberate user action or an
+> explicitly enabled opt-in feature. Do not reintroduce; see CHANGELOG 2.3.0.
+> The notes below are kept for historical context only.
+
 ### 🔴 The Challenge
 Navigating to external sites can sometimes feel sluggish due to the overhead of **DNS Resolution**, **TCP Handshake**, and **TLS Negotiation** (which can add 100ms–300ms of latency).
 

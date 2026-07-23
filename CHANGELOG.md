@@ -2,6 +2,82 @@
 
 All notable changes to NullTrail are documented in this file.
 
+## [2.3.0] — 2026-07-23
+
+**Theme: zero speculative traffic and metered-network friendliness, plus a UX
+pass on the dashboard.** Every byte of optional background traffic is now
+deliberate, capped, and automatically paused on metered / Data-Saver
+connections. No breaking changes.
+
+Verification: the regression suite grew a network-friendliness harness
+(`tests/smoke-network.js`) with an instrumented `fetch` — it proves **zero
+requests** are made on a simulated metered connection, that normal connections
+behave as before, and that the user override works. All suites green in CI.
+
+### 🔴 Removed
+
+1. **Speculative hover warmup deleted entirely** (`warmupTargetServer`).
+   - *Problem:* On every anchor hover, NullTrail injected `dns-prefetch` and
+     `preconnect` hints — opening speculative connections to servers the user
+     might never visit. Wasted bandwidth and a hover-intent leak, worst
+     precisely on the metered/limited networks that can least afford it.
+     (v2.2.0 had only capped the DOM leak; the traffic itself remained.)
+   - *Fix:* Feature removed. **Guarantee: hovering a link costs zero bytes.**
+     Bytes only flow after deliberate user actions (a click, or an explicitly
+     enabled opt-in feature).
+   - *Side effects:* Clicking a link may cost up to ~100–300ms of connection
+     setup on cold origins — the correct trade for bandwidth and privacy.
+   - *Risk:* None (removal). Verified no dangling references.
+
+### 🟢 Metered-network gating (new policy checkpoint)
+
+2. **`respectMetered` setting (default ON)** + `isMeteredConnection()` /
+   `backgroundDataAllowed()` helpers reading the Network Information API
+   (`navigator.connection.saveData` / `.metered`). All optional background
+   traffic now flows through this single checkpoint:
+   - **Scheduled rule updates** — skipped entirely on metered links (a manual
+     "Check for updates now" is user intent and always runs).
+   - **Hover server-redirect resolution** — paused on metered links even when
+     opted in, and now also capped at **25 resolutions per page** so infinite
+     SERPs can't generate unbounded traffic.
+   - **AdNauseam-style ad-noise clicks** — paused on metered links even when
+     opted in (this feature *deliberately* generates traffic, so it yields
+     first).
+   - *Firefox note:* the Network Information API is Chromium-only; where it is
+     absent, detection reports "unknown" and behavior stays conservative by
+     default (everything heavy is opt-in anyway). The toggle remains available
+     for explicit control.
+
+3. **Failed rule updates now back off gently** (`rulesNextTry`).
+   - *Problem:* Any outage/offline period caused a fresh retry on every matched
+     page load (plus the 6-hour interval).
+   - *Fix:* Capped exponential backoff for *scheduled* updates (6h → 12h → 24h),
+     persisted across page loads, reset on the first reachable response or
+     manual update.
+
+### 🔵 UX / usability pass (friendlier by design)
+
+4. **Plain-language tooltips on every dashboard toggle** (`TOGGLE_HINTS`) —
+   hovering any option explains in one sentence what it does, and options that
+   consume data say so in their label ("uses extra data", "uses a little data").
+5. **Up-front reassurance** in the Settings tab: "All processing happens
+   locally on your device — nothing is ever uploaded."
+6. **Network transparency in the Stats tab**: live rows showing whether a
+   metered/Data-Saver connection is detected and whether optional background
+   downloads are currently allowed or paused.
+7. Clearer labels: "Auto-update cleaning rules (paused on metered)",
+   "Save Mobile Data (metered-network friendly)".
+8. "Reset all settings" now also clears `respectMetered` and the
+   `rulesNextTry` backoff marker.
+
+### ⚪ Tests & docs
+
+9. `tests/smoke-network.js` — 3 scenarios (metered / unmetered / override)
+   wired into CI. README documents the zero-speculative-traffic guarantee and
+   the new metered behavior.
+
+[2.2.0]: full-repo audit release below.
+
 ## [2.2.0] — 2026-07-23
 
 This release is the result of a full repository-wide audit (every execution path,
