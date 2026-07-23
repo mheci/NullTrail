@@ -38,6 +38,13 @@ ok(/\/\/ @connect\s+rules1\.clearurls\.xyz/.test(metaBlock) && /\/\/ @connect\s+
 ok(script.indexOf("warmupTargetServer") === -1, "speculative warmup fully removed");
 ok((script.match(/v2\.4\.0/g) || []).length >= 1, "v2.4.0 annotations present");
 
+// v2.6.0 guards
+ok(/\/\/ @match\s+\*:\/\/\*\.cdn\.ampproject\.org\/\*/.test(metaBlock), "@match covers cdn.ampproject.org (AMP viewer unwrap active)");
+ok(script.indexOf("recordRuleResult") !== -1 && script.indexOf("rulesLastResult") !== -1,
+    "update checker reports truthful persisted results (v2.6.0 contract)");
+ok(!/return decodeURIComponent\(m\[1\]\)/.test(script), "no unguarded decodeURIComponent on the sanitize hot path");
+ok(!/if \(!u \|\| !\/duckduckgo\\\.com\$\//.test(script), "unwrapDDG host pattern has a domain boundary");
+
 console.log("\n== Summary ==");
 if (failures.length) { console.log(failures.length + " failure(s)"); process.exit(1); }
 console.log("All metadata checks passed");

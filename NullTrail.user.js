@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NullTrail — Universal Tracking & Redirect Scrubber
 // @namespace    https://github.com/nulltrail
-// @version      2.5.0
+// @version      2.6.0
 // @description  Fix the web.
 // @license      Unlicense
 // @supportURL   https://github.com/mheci/NullTrail/issues
@@ -998,6 +998,8 @@
 // @match        *://*.googlesyndication.com/*
 // @match        *://*.doubleclick.net/*
 // @match        *://*.googleadservices.com/*
+// @match        *://*.cdn.ampproject.org/*
+// @match        *://cdn.ampproject.org/*
 // @exclude      *://*/robots.txt*
 // @exclude      *://*.clearurls.xyz/*
 // @updateURL    https://raw.githubusercontent.com/mheci/NullTrail/main/NullTrail.user.js
@@ -1184,6 +1186,24 @@
     let _statFlush = null;
     // Pending deltas not yet merged into persistent storage.
     let _deltaCleaned = 0, _deltaFields = 0, _deltaBlocked = 0;
+    function flushStats() {
+        if (_statFlush) {
+            clearTimeout(_statFlush);
+            _statFlush = null;
+        }
+        if (!_deltaCleaned && !_deltaFields && !_deltaBlocked) return;
+        // Bug Fix (v2.5.0): merge deltas into storage instead of writing
+        // absolute counters — two tabs used to overwrite each other's counts
+        // (last writer wins).
+        const dc = _deltaCleaned, df = _deltaFields, db = _deltaBlocked;
+        _deltaCleaned = _deltaFields = _deltaBlocked = 0;
+        SV("statCleaned", (GV("statCleaned", 0) | 0) + dc);
+        SV("statFields", (GV("statFields", 0) | 0) + df);
+        SV("statBlocked", (GV("statBlocked", 0) | 0) + db);
+    }
+    // Bug Fix (v2.6.0): deltas pending in the 1.5s debounce window were lost
+    // when the tab closed or navigated right after a burst of cleaning — flush
+    // on pagehide / backgrounding so every cleaned link is counted.
     function bumpStats(fieldsRemoved, blocked) {
         if (!CFG.statistics) return;
         STATS.cleaned++;
@@ -1193,19 +1213,14 @@
         _deltaFields += fieldsRemoved || 0;
         _deltaBlocked += blocked ? 1 : 0;
         if (_statFlush) return;
-        _statFlush = setTimeout(function() {
-            _statFlush = null;
-            // Bug Fix (v2.5.0): merge deltas into storage instead of writing
-            // absolute counters — two tabs used to overwrite each other's counts
-            // (last writer wins). Also shortened 4s→1.5s flush so less data is
-            // lost when a tab closes right after a burst of cleaning.
-            const dc = _deltaCleaned, df = _deltaFields, db = _deltaBlocked;
-            _deltaCleaned = _deltaFields = _deltaBlocked = 0;
-            SV("statCleaned", (GV("statCleaned", 0) | 0) + dc);
-            SV("statFields", (GV("statFields", 0) | 0) + df);
-            SV("statBlocked", (GV("statBlocked", 0) | 0) + db);
-        }, 1500);
+        _statFlush = setTimeout(flushStats, 1500);
     }
+    try {
+        window.addEventListener("pagehide", flushStats);
+        document.addEventListener("visibilitychange", function() {
+            if (document.visibilityState === "hidden") flushStats();
+        });
+    } catch (e) {}
 
     function log(...args) {
         if (!CFG.debug && !CFG.logging) return;
@@ -1634,23 +1649,41 @@
     // on healthy connections).
     let _ruleFailCount = 0;
 
+    // v2.6.0: updateRules resolves with a RESULT STRING instead of an empty
+    // fulfillment. Previously it swallowed every failure path, so the dashboard's
+    // "Check for updates now" button cheerfully reported "Updated successfully"
+    // even when all three feeds were unreachable or the hash verification
+    // failed — the update checker lied. Statuses: "updated" (fresh database
+    // installed), "current" (remote hash identical — nothing to do), "failed"
+    // (transport, hash-mismatch, parse, or structural rejection), "busy" (a
+    // check is already in flight), "skipped" (scheduled gate: too soon, in
+    // failure backoff, or metered connection).
+    let _lastRuleResult = "";
+    function recordRuleResult(status) {
+        _lastRuleResult = status;
+        try {
+            SV("rulesLastCheck", Date.now());
+            SV("rulesLastResult", status);
+        } catch (e) {}
+    }
+
     function updateRules(force) {
-        if (!CFG.autoUpdateRules && !force) return Promise.resolve();
+        if (!CFG.autoUpdateRules && !force) return Promise.resolve("skipped");
         // In-flight guard: boot, the 6-hour interval, and manual dashboard updates
         // could otherwise run duplicate parallel downloads of the same ~200KB feed.
-        if (_updatingRules) return Promise.resolve();
+        if (_updatingRules) return Promise.resolve("busy");
         if (!force) {
             // Metered-friendly (v2.3.0): scheduled updates are skipped entirely on
             // metered / Data-Saver connections. A manual "Check for updates now"
             // (force) is user intent and always allowed.
             if (!backgroundDataAllowed()) {
                 log("rule auto-update skipped: metered / data-saver connection");
-                return Promise.resolve();
+                return Promise.resolve("skipped");
             }
             const last = GV("rulesUpdated", 0) | 0;
-            if (last && Date.now() - last < UPDATE_INTERVAL) return Promise.resolve();
+            if (last && Date.now() - last < UPDATE_INTERVAL) return Promise.resolve("skipped");
             const nextTry = GV("rulesNextTry", 0) | 0;
-            if (nextTry && Date.now() < nextTry) return Promise.resolve();
+            if (nextTry && Date.now() < nextTry) return Promise.resolve("skipped");
         }
         _updatingRules = true;
         return firstOK(HASH_URLS).then(hr => {
@@ -1661,32 +1694,33 @@
             if (remoteHash && cachedHash === remoteHash && GV("rulesData", null)) {
                 SV("rulesUpdated", Date.now());
                 log("rules already up to date");
-                return;
+                return "current";
             }
             return firstOK(RULE_URLS).then(dr => {
                 const dataText = (dr.text || "").trim();
                 const accept = digest => {
                     if (remoteHash && digest && digest !== remoteHash) {
                         log("rule hash mismatch");
-                        return;
+                        return "failed";
                     }
                     let data;
                     try {
                         data = JSON.parse(dataText);
                     } catch (e) {
                         log("rule parse failed");
-                        return;
+                        return "failed";
                     }
                     // Never replace a working ruleset with structurally invalid data.
                     if (!data || !data.providers || Object.keys(data.providers).length === 0) {
                         log("rule payload invalid");
-                        return;
+                        return "failed";
                     }
                     SV("rulesData", data);
                     if (digest) SV("rulesHash", digest);
                     SV("rulesUpdated", Date.now());
                     setRules(data);
                     log("rules updated from feed");
+                    return "updated";
                 };
                 // crypto.subtle is unavailable in insecure (http://) contexts. The
                 // hash file is served from the same trusted origin as the data, so
@@ -1696,17 +1730,24 @@
                 }
                 return accept(null);
             });
-        }).then(() => {
+        }).then(status => {
             _ruleFailCount = 0;
             if (GV("rulesNextTry", 0) | 0) SV("rulesNextTry", 0);
             _updatingRules = false;
+            // Defensive: an anomalous empty status must never masquerade as success.
+            recordRuleResult(status || "failed");
+            return status || "failed";
         }, e => {
             _ruleFailCount++;
             // Capped exponential backoff: 6h → 12h → 24h (max), persisted.
+            // Manual (forced) checks share the transport, so they share the
+            // backoff — but the failure is still reported honestly to the UI.
             const backoff = Math.min(6 * 3600 * 1000 * Math.pow(2, Math.min(_ruleFailCount - 1, 2)), 24 * 3600 * 1000);
             SV("rulesNextTry", Date.now() + backoff);
             _updatingRules = false;
+            recordRuleResult("failed");
             log("rule update failed:", e && e.message, "— retry paused for", Math.round(backoff / 360000) / 10, "h");
+            return "failed";
         });
     }
 
@@ -1742,7 +1783,8 @@
     }
 
     function unwrapYahoo(u) {
-        if (!u || !/\.?search\.yahoo\./i.test(u.hostname)) return null;
+        // Precision Fix (v2.6.0): "\.?" matched "evilsearch.yahoo.*" hosts.
+        if (!u || !/(?:^|\.)search\.yahoo\./i.test(u.hostname)) return null;
         const combined = (u.pathname || "") + (u.search || "");
         const m = /\/RU=(.+?)(?=\/[A-Za-z]{1,2}=|$)/i.exec(combined);
         if (!m) return null;
@@ -1752,7 +1794,8 @@
     }
 
     function unwrapDDG(u) {
-        if (!u || !/duckduckgo\.com$/i.test(u.hostname)) return null;
+        // Precision Fix (v2.6.0): missing host boundary matched "notduckduckgo.com".
+        if (!u || !/(?:^|\.)duckduckgo\.com$/i.test(u.hostname)) return null;
         if (u.pathname !== "/l/") return null;
         const m = /[?&]uddg=([^&]+)/.exec(u.search);
         if (m) {
@@ -1763,7 +1806,8 @@
     }
 
     function unwrapYandex(u) {
-        if (!u || !/\.?yandex\.[a-z]{2,}$/i.test(u.hostname)) return null;
+        // Precision Fix (v2.6.0): "\.?" matched "xyandex.com" lookalike hosts.
+        if (!u || !/(?:^|\.)yandex\.[a-z]{2,}$/i.test(u.hostname)) return null;
         if (u.pathname.indexOf("/clck/") !== 0) return null;
         const m = /[?&](?:url|u)=([^&]+)/.exec(u.search);
         if (m) {
@@ -1914,7 +1958,9 @@
     }, {
         n: "perplexity",
         h: /(^|\.)perplexity\.ai$/i,
-        s: [ "copilot", "q", "s", "rq" ]
+        // Bug Fix (v2.6.0): "q" is Perplexity's QUERY parameter — stripping it
+        // emptied the search on reload and destroyed every shared link.
+        s: [ "copilot", "s", "rq" ]
     }, {
         n: "phind",
         h: /(^|\.)phind\.com$/i,
@@ -1950,7 +1996,9 @@
     }, {
         n: "walla",
         h: /(^|\.)search\.walla\.co\.il$/i,
-        s: [ "e", "q", "l" ]
+        // Bug Fix (v2.6.0): "q" is Walla's QUERY parameter — stripping it broke
+        // reloads and shared result links.
+        s: [ "e", "l" ]
     } ];
 
     // Hardening (v2.4.0): null-prototype map — hostname keys are attacker-influenced
@@ -1990,16 +2038,20 @@
         }
     }
 
+    // Hardening (v2.6.0): every capture is run through safeDecode() —
+    // decodeURIComponent() THROWS URIError on malformed escapes (e.g. "%E0%A4"
+    // truncated by a lazy CMS), and this extractor sits on the sanitize hot
+    // path, so one bad href previously crashed the whole cleaning pass.
     function extractGoogleRedirect(urlObj) {
         if (!urlObj || (urlObj.protocol !== "https:" && urlObj.protocol !== "http:")) return null;
         const h = urlObj.hostname, p = urlObj.pathname, s = urlObj.search, hash = urlObj.hash;
         let m;
         if (isGoogleHost(h) && (p === "/url" || p === "/local_url" || p === "/searchurl/rr.html" || p === "/linkredirect" || p === "/interstitial")) {
-            if (m = /[?&](?:q|url|dest|imgurl|continue)=((?:https?|ftp)[%:][^&]+)/.exec(s)) return decodeURIComponent(m[1]);
-            if (m = /[?&](?:q|url|dest|continue)=((?:%2[Ff]|\/)[^&]+)/.exec(s)) return urlObj.origin + decodeURIComponent(m[1]);
-            if (m = /[#&]url=(https?[:%][^&]+)/.exec(hash)) return decodeURIComponent(m[1]);
+            if (m = /[?&](?:q|url|dest|imgurl|continue)=((?:https?|ftp)[%:][^&]+)/.exec(s)) return safeDecode(m[1]);
+            if (m = /[?&](?:q|url|dest|continue)=((?:%2[Ff]|\/)[^&]+)/.exec(s)) return urlObj.origin + safeDecode(m[1]);
+            if (m = /[#&]url=(https?[:%][^&]+)/.exec(hash)) return safeDecode(m[1]);
         }
-        if (isGoogleHost(h) && p === "/sorry/index" && (m = /[?&]continue=((?:https?)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
+        if (isGoogleHost(h) && p === "/sorry/index" && (m = /[?&]continue=((?:https?)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
         if (h === "cdn.ampproject.org" || h.indexOf(".cdn.ampproject.org") > -1 || h === "www.bing-amp.com" || h.indexOf(".bing-amp.com") > -1) {
             const amp = (p || "").replace(/^\/c\/s\/|^\/v\/[^/]+\/|^\/+/, "").replace(/^\/+/, "");
             if (amp && amp.indexOf("/") > -1) {
@@ -2007,20 +2059,20 @@
                 if (isGoodLink(ampd)) return ampd;
             }
         }
-        if (isGoogleHost(h) && p === "/maps/preview/place" && (m = /[?&](?:q|url)=((?:https?)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
-        if (h === "googleweblight.com" && (p === "/fp" || p === "/i" || p === "/lite") && (m = /[?&]u=((?:https?|ftp)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
-        if (h.indexOf("googleadservices") > -1 && p === "/pagead/aclk" && (m = /[?&](?:adurl|dest)=((?:https?)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
-        if (h.indexOf("consent.google") === 0 && (m = /[?&]continue=((?:https?)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
-        if ((h === "news.google.com" || h === "discover.google.com") && (m = /[?&](?:url|dest)=((?:https?)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
+        if (isGoogleHost(h) && p === "/maps/preview/place" && (m = /[?&](?:q|url)=((?:https?)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
+        if (h === "googleweblight.com" && (p === "/fp" || p === "/i" || p === "/lite") && (m = /[?&]u=((?:https?|ftp)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
+        if (h.indexOf("googleadservices") > -1 && p === "/pagead/aclk" && (m = /[?&](?:adurl|dest)=((?:https?)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
+        if (h.indexOf("consent.google") === 0 && (m = /[?&]continue=((?:https?)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
+        if ((h === "news.google.com" || h === "discover.google.com") && (m = /[?&](?:url|dest)=((?:https?)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
         if (/^\/amp\/s\//.test(p)) {
             const c = p.substring(7) + s + hash;
             if (c && c !== "/") return "https://" + c;
         }
-        if (h.indexOf("translate.google") === 0 && p === "/translate" && (m = /[?&]u=((?:https?)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
-        if (h.indexOf("scholar.google") === 0 && p === "/scholar_url" && (m = /[?&]url=((?:https?|ftp)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
-        if (h.indexOf("books.google") === 0 && (m = /[?&](?:url|redirect)=((?:https?)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
-        if (h === "play.google.com" && p === "/url" && (m = /[?&]url=((?:https?)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
-        if (h.indexOf(".googlesyndication.com") > -1 && (m = /[?&](?:adurl|dest_url|redirect)=((?:https?)[%:][^&]+)/.exec(s))) return decodeURIComponent(m[1]);
+        if (h.indexOf("translate.google") === 0 && p === "/translate" && (m = /[?&]u=((?:https?)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
+        if (h.indexOf("scholar.google") === 0 && p === "/scholar_url" && (m = /[?&]url=((?:https?|ftp)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
+        if (h.indexOf("books.google") === 0 && (m = /[?&](?:url|redirect)=((?:https?)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
+        if (h === "play.google.com" && p === "/url" && (m = /[?&]url=((?:https?)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
+        if (h.indexOf(".googlesyndication.com") > -1 && (m = /[?&](?:adurl|dest_url|redirect)=((?:https?)[%:][^&]+)/.exec(s))) return safeDecode(m[1]);
         return null;
     }
 
@@ -2688,15 +2740,15 @@
             if (a.protocol !== "https:" && a.protocol !== "http:") return null;
             let url;
             if ((isG(a.hostname) || a.hostname === win.location.hostname) && (a.pathname === "/url" || a.pathname === "/local_url" || a.pathname === "/searchurl/rr.html" || a.pathname === "/linkredirect" || a.pathname === "/interstitial")) {
-                if (url = /[?&](?:q|url|dest|imgurl|continue)=((?:https?|ftp)[%:][^&]+)/.exec(a.search)) return decodeURIComponent(url[1]);
-                if (url = /[?&](?:q|url|dest|continue)=((?:%2[Ff]|\/)[^&]+)/.exec(a.search)) return a.origin + decodeURIComponent(url[1]);
-                if (url = /[#&]url=(https?[:%][^&]+)/.exec(a.hash)) return decodeURIComponent(url[1]);
+                if (url = /[?&](?:q|url|dest|imgurl|continue)=((?:https?|ftp)[%:][^&]+)/.exec(a.search)) return safeDec(url[1]);
+                if (url = /[?&](?:q|url|dest|continue)=((?:%2[Ff]|\/)[^&]+)/.exec(a.search)) return a.origin + safeDec(url[1]);
+                if (url = /[#&]url=(https?[:%][^&]+)/.exec(a.hash)) return safeDec(url[1]);
             }
             if (a.hostname === "googleweblight.com" && (a.pathname === "/fp" || a.pathname === "/i" || a.pathname === "/lite")) {
-                if (url = /[?&]u=((?:https?|ftp)[%:][^&]+)/.exec(a.search)) return decodeURIComponent(url[1]);
+                if (url = /[?&]u=((?:https?|ftp)[%:][^&]+)/.exec(a.search)) return safeDec(url[1]);
             }
             if (a.hostname.indexOf("googleadservices") > -1 && a.pathname === "/pagead/aclk") {
-                if (url = /[?&](?:adurl|dest)=((?:https?)[%:][^&]+)/.exec(a.search)) return decodeURIComponent(url[1]);
+                if (url = /[?&](?:adurl|dest)=((?:https?)[%:][^&]+)/.exec(a.search)) return safeDec(url[1]);
             }
             return null;
         }
@@ -2713,7 +2765,7 @@
         }
 
         function realYahoo(a) {
-            if (!/\.?search\.yahoo\./i.test(a.hostname)) return null;
+            if (!/(?:^|\.)search\.yahoo\./i.test(a.hostname)) return null;
             const comb = (a.pathname || "") + (a.search || "");
             const m = /\/RU=(.+?)(?=\/[A-Za-z]{1,2}=|$)/i.exec(comb);
             if (!m) return null;
@@ -2722,7 +2774,7 @@
         }
 
         function realDDG(a) {
-            if (!/duckduckgo\.com$/i.test(a.hostname) || a.pathname !== "/l/") return null;
+            if (!/(?:^|\.)duckduckgo\.com$/i.test(a.hostname) || a.pathname !== "/l/") return null;
             const m = /[?&]uddg=([^&]+)/.exec(a.search);
             if (!m) return null;
             const d = safeDec(m[1]);
@@ -3215,6 +3267,14 @@
                             Object.defineProperty(d, "readyState", { get: () => 2 });
                             Object.defineProperty(d, "url", { get: () => String(args[0]) });
                             d.close = () => {};
+                            // Robustness (v2.6.0): inherited EventTarget methods
+                            // require a real EventSource internal slot and throw
+                            // "Illegal invocation" on this shell — stub them so a
+                            // site attaching handlers to a blocked stream survives.
+                            d.addEventListener = () => {};
+                            d.removeEventListener = () => {};
+                            d.dispatchEvent = () => true;
+                            d.onopen = d.onmessage = d.onerror = null;
                             return d;
                         }
                         return Reflect.construct(T, args);
@@ -3282,7 +3342,24 @@
                 const fakeWebSocket = new Proxy(WebSocketRef, {
                     construct: function(T, args) {
                         loadCfg();
-                        if (args[0] && shouldBlock(args[0]) === "iplogger") return {};
+                        if (args[0] && shouldBlock(args[0]) === "iplogger") {
+                            // Robustness (v2.6.0): was a bare {} — a page calling
+                            // addEventListener/send/close on its "socket" crashed.
+                            return {
+                                readyState: 3, // CLOSED
+                                bufferedAmount: 0,
+                                extensions: "",
+                                protocol: "",
+                                url: String(args[0]),
+                                binaryType: "blob",
+                                onopen: null, onmessage: null, onerror: null, onclose: null,
+                                send: () => {},
+                                close: () => {},
+                                addEventListener: () => {},
+                                removeEventListener: () => {},
+                                dispatchEvent: () => true
+                            };
+                        }
                         return Reflect.construct(T, args);
                     }
                 });
@@ -3444,7 +3521,14 @@
                 el.removeAttribute("ping");
             }
             const orig = el.href;
-            const cleaned = sanitizeHref(orig);
+            // Robustness (v2.6.0): sanitize runs regex/provider machinery — keep
+            // any residual throw from escaping into page event handlers.
+            let cleaned = null;
+            try {
+                cleaned = sanitizeHref(orig);
+            } catch (e) {
+                log("sanitizeHref failed", e);
+            }
             const didChange = cleaned && cleaned !== orig;
             if (didChange) {
                 try {
@@ -3544,6 +3628,13 @@
             method: "HEAD",
             url: el.href,
             anonymous: true, // Strips cookies to prevent tracking
+            // Bug Fix (v2.6.0): no timeout previously — a hung HEAD request kept
+            // el._nt_resolving latched forever and permanently consumed one of
+            // the 25-per-page budget slots.
+            timeout: 10000,
+            ontimeout: function() {
+                el._nt_resolving = false;
+            },
             onload: function(response) {
                 try {
                     let target = null;
@@ -3666,7 +3757,14 @@
             const el = linkCleaningQueue.shift();
             if (el) {
                 QUEUED.delete(el);
-                cleanAnchor(el);
+                // Robustness (v2.6.0): never let ONE anchor's exception kill the
+                // idle-clean loop for the whole page — isCleanupScheduled would
+                // stay latched true and all future cleaning would silently stop.
+                try {
+                    cleanAnchor(el);
+                } catch (e) {
+                    log("cleanAnchor failed", e);
+                }
             }
         }
         if (linkCleaningQueue.length > 0) {
@@ -4100,6 +4198,17 @@
             shadow = container;
         }
 
+        // Accessibility (v2.6.0): restore keyboard focus to whatever the user was
+        // doing before the dashboard opened, and route every close path through
+        // one helper so focus/Esc cleanup can't drift apart.
+        let prevFocus = null;
+        try { prevFocus = document.activeElement; } catch (e) {}
+        function closeDash() {
+            document.removeEventListener("keydown", onEsc, true);
+            try { container.remove(); } catch (err) {}
+            try { if (prevFocus && prevFocus.focus) prevFocus.focus(); } catch (e) {}
+        }
+
         // UX (v2.4.0): Escape closes the dashboard.
         function onEsc(e) {
             if (!container.isConnected) {
@@ -4108,8 +4217,7 @@
             }
             if (e.key === "Escape") {
                 e.stopPropagation();
-                try { container.remove(); } catch (err) {}
-                document.removeEventListener("keydown", onEsc, true);
+                closeDash();
             }
         }
         document.addEventListener("keydown", onEsc, true);
@@ -4117,30 +4225,41 @@
         const ov = ntEl("div", null, "position:fixed;inset:0;z-index:2147483647;background:rgba(10,12,20,.6);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif");
         ov.id = "nt-dashboard";
         const box = ntEl("div", null, "background:#131720;color:#dfe4ee;border-radius:12px;width:480px;max-width:94vw;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 16px 70px rgba(0,0,0,.65);border:1px solid rgba(255,255,255,.07);overflow:hidden");
+        // Accessibility (v2.6.0): real dialog semantics for screen readers.
+        try {
+            box.setAttribute("role", "dialog");
+            box.setAttribute("aria-modal", "true");
+            box.setAttribute("aria-label", "NullTrail settings");
+        } catch (e) {}
         const hdr = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06)");
         const hdrLeft = ntEl("div", null, "display:flex;flex-direction:column");
         hdrLeft.appendChild(ntEl("span", "NullTrail", "font-size:17px;font-weight:700;color:#14b8a6"));
-        hdrLeft.appendChild(ntEl("span", "v2.5.0", "font-size:11px;color:#6b7280;margin-top:2px"));
+        hdrLeft.appendChild(ntEl("span", "v2.6.0", "font-size:11px;color:#6b7280;margin-top:2px"));
         hdr.appendChild(hdrLeft);
-        const closeBtn = ntEl("button", "x", "background:none;border:none;color:#9ca3af;font-size:22px;cursor:pointer;padding:0 4px;line-height:1");
-        closeBtn.title = "Close";
+        const closeBtn = ntEl("button", "×", "background:none;border:none;color:#9ca3af;font-size:24px;cursor:pointer;padding:0 4px;line-height:1");
+        closeBtn.title = "Close (Esc)";
+        try { closeBtn.setAttribute("aria-label", "Close dashboard"); } catch (e) {}
         closeBtn.addEventListener("click", function() {
-            container.remove();
+            closeDash();
         });
         hdr.appendChild(closeBtn);
         box.appendChild(hdr);
         const tabBar = ntEl("div", null, "display:flex;border-bottom:1px solid rgba(255,255,255,.06);background:rgba(0,0,0,.15)");
+        try { tabBar.setAttribute("role", "tablist"); } catch (e) {}
         const tabs = [ "Settings", "Sites", "Stats", "Rules", "About" ];
         const tabBtns = [];
         const content = ntEl("div", null, "flex:1;overflow:auto;padding:18px 20px");
+        try { content.setAttribute("role", "tabpanel"); } catch (e) {}
         
         function showTab(idx) {
             for (let i = 0; i < tabBtns.length; i++) {
                 tabBtns[i].style.color = "#9ca3af";
                 tabBtns[i].style.borderBottomColor = "transparent";
+                try { tabBtns[i].setAttribute("aria-selected", "false"); } catch (e) {}
             }
             tabBtns[idx].style.color = "#14b8a6";
             tabBtns[idx].style.borderBottomColor = "#14b8a6";
+            try { tabBtns[idx].setAttribute("aria-selected", "true"); } catch (e) {}
             
             while (content.firstChild) content.removeChild(content.firstChild);
             if (idx === 0) renderSettings(); 
@@ -4152,6 +4271,7 @@
         
         tabs.forEach((label, i) => {
             const btn = ntEl("button", label, "flex:1;padding:10px 6px;background:none;border:none;color:#9ca3af;font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;transition:color .15s");
+            try { btn.setAttribute("role", "tab"); } catch (e) {}
             btn.addEventListener("click", function() {
                 showTab(i);
             });
@@ -4275,10 +4395,16 @@
             // to append a duplicate set of rows on top of the stale ones.
             while (content.firstChild) content.removeChild(content.firstChild);
             const eng = getEngine(location.hostname);
+            // Accuracy (v2.6.0): display fresh cross-tab storage merged with this
+            // tab's pending (unflushed) deltas — the old read showed the counters
+            // exactly as they were when this page loaded, ignoring other tabs.
+            const dispCleaned = (GV("statCleaned", 0) | 0) + _deltaCleaned;
+            const dispFields = (GV("statFields", 0) | 0) + _deltaFields;
+            const dispBlocked = (GV("statBlocked", 0) | 0) + _deltaBlocked;
             const rows = [ 
-                [ "Links Sanitized", STATS.cleaned ], 
-                [ "Query Parameters Stripped", STATS.fields ], 
-                [ "Tracking Requests Blocked", STATS.blocked ], 
+                [ "Links Sanitized", dispCleaned ], 
+                [ "Query Parameters Stripped", dispFields ], 
+                [ "Tracking Requests Blocked", dispBlocked ], 
                 [ "Database Cleaners Active", PROVIDERS.length ], 
                 [ "Engine Scrapers Configured", ENGINES.length ], 
                 [ "Bypass Handlers Loaded", DOMAIN_REDIRECTS.length ], 
@@ -4311,12 +4437,24 @@
             while (content.firstChild) content.removeChild(content.firstChild);
             const lastUpd = GV("rulesUpdated", 0) | 0;
             const lastHash = GV("rulesHash", "");
+            const lastCheck = GV("rulesLastCheck", 0) | 0;
+            const lastResult = String(GV("rulesLastResult", "") || _lastRuleResult || "");
             const dateStr = lastUpd ? new Date(lastUpd).toLocaleString() : "never";
+            // v2.6.0: plain-language, honest result labels (see updateRules contract).
+            const RESULT_LABELS = {
+                updated: [ "Fresh database installed", "#14b8a6" ],
+                current: [ "Already up to date", "#14b8a6" ],
+                failed: [ "Failed — auto-retry scheduled", "#ef4444" ],
+                busy: [ "Check already in progress", "#f59e0b" ],
+                skipped: [ "Skipped (metered network / schedule)", "#f59e0b" ]
+            };
+            const rl = RESULT_LABELS[lastResult] || null;
             const rows = [ 
                 [ "Loaded Cleaners", PROVIDERS.length ], 
                 [ "Last Rule Update", dateStr ], 
                 [ "Database Verification Hash", lastHash ? "Verified (" + lastHash.substring(0, 12) + "...)" : "Not Cached" ], 
-                [ "Automatic Updates", CFG.autoUpdateRules ? "Enabled (Every 6 days)" : "Disabled" ] 
+                [ "Automatic Updates", CFG.autoUpdateRules ? "Enabled (Every 6 days)" : "Disabled" ],
+                [ "Last Update Check", lastCheck ? new Date(lastCheck).toLocaleString() : "never" ]
             ];
             rows.forEach(r => {
                 const row = ntEl("div", null, "display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.04)");
@@ -4324,27 +4462,41 @@
                 row.appendChild(ntEl("span", String(r[1]), "font-size:13px;font-weight:600;color:#dfe4ee"));
                 content.appendChild(row);
             });
+            if (rl) {
+                const row = ntEl("div", null, "display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.04)");
+                row.appendChild(ntEl("span", "Last Update Result", "font-size:13px;color:#9ca3af"));
+                row.appendChild(ntEl("span", rl[0], "font-size:13px;font-weight:600;color:" + rl[1]));
+                content.appendChild(row);
+            }
+            content.appendChild(ntEl("div", "Userscript updates are handled automatically by your userscript manager (Tampermonkey/Violentmonkey) via the GitHub feed — no manual action needed.", "font-size:11px;color:#6b7280;line-height:1.5;margin-top:10px"));
             const updBtn = ntEl("button", "Check for updates now", "margin-top:14px;width:100%;padding:10px;border:none;border-radius:6px;background:#14b8a6;color:#fff;font-size:13px;font-weight:600;cursor:pointer");
             updBtn.addEventListener("click", function() {
-                updBtn.textContent = "Checking...";
+                updBtn.textContent = "Checking all rule feeds...";
                 updBtn.disabled = true;
-                updateRules(true).then(function() {
-                    updBtn.textContent = "Updated successfully";
+                // v2.6.0: updateRules now resolves with a truthful result string.
+                updateRules(true).then(function(status) {
+                    const lbl = RESULT_LABELS[status];
+                    updBtn.textContent = lbl ? lbl[0] : "Done";
+                    updBtn.title = "Result: " + status;
                     setTimeout(function() {
                         updBtn.textContent = "Check for updates now";
                         updBtn.disabled = false;
                         renderRules();
-                    }, 1500);
+                    }, 1600);
                 }).catch(function() {
-                    updBtn.textContent = "Check for updates now";
-                    updBtn.disabled = false;
+                    // Contract says this never rejects, but stay truthful even then.
+                    updBtn.textContent = "Update failed — auto-retry scheduled";
+                    setTimeout(function() {
+                        updBtn.textContent = "Check for updates now";
+                        updBtn.disabled = false;
+                    }, 1600);
                 });
             });
             content.appendChild(updBtn);
         }
 
         function renderAbout() {
-            content.appendChild(ntEl("div", "NullTrail v2.5.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "NullTrail v2.6.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
             content.appendChild(ntEl("div", "An autonomous, zero-jargon browser privacy engine fusing advanced hyperlink scrubbing, tracking parameter deletion, fast-forward redirect unwrapping, and strict analytical API shielding.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:14px"));
             const features = [ 
                 "40+ Search Engine Redirect unwrapping & sanitization", 
@@ -4370,9 +4522,9 @@
                     agreed = window.confirm("Are you sure you want to reset all NullTrail settings, whitelist sites, and cached rule databases?");
                 } catch (e) {}
                 if (agreed) {
-                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation", "serverRedirectResolution", "respectMetered", "rulesNextTry" ].forEach(DV);
+                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "rulesLastCheck", "rulesLastResult", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation", "serverRedirectResolution", "respectMetered", "rulesNextTry" ].forEach(DV);
                     try { window.alert("Settings successfully reset. Please reload the webpage."); } catch (e) {}
-                    container.remove();
+                    closeDash();
                 }
             });
             content.appendChild(resetBtn);
@@ -4380,11 +4532,14 @@
         
         ov.appendChild(box);
         ov.addEventListener("click", function(e) {
-            if (e.target === ov) container.remove();
+            if (e.target === ov) closeDash();
         });
         showTab(0);
         shadow.appendChild(ov);
         (document.body || document.documentElement).appendChild(container);
+        // Accessibility (v2.6.0): move focus into the dialog so keyboard and
+        // screen-reader users land inside it instead of staring at the page.
+        try { closeBtn.focus(); } catch (e) {}
     }
 
     // UX safety (v2.5.0): never hijack shortcuts while the user is typing.
@@ -4428,7 +4583,9 @@
             pushConfigToPage();
         });
         GM_registerMenuCommand("Update rules now", function() {
-            updateRules(true).then(function() {});
+            updateRules(true).then(function(status) {
+                log("manual rule update finished:", status);
+            });
         });
     }
 
@@ -4527,5 +4684,5 @@
     setTimeout(function() { updateRules(false); }, 3000);
     setInterval(function() { updateRules(false); }, 6 * 3600 * 1000);
 
-    log("NullTrail v2.5.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
+    log("NullTrail v2.6.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
 })();

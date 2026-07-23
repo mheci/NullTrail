@@ -1,5 +1,93 @@
 # NullTrail Audit Ledger
 
+## Round 3 — v2.6.0 (10-pass hunt)
+
+Third full iteration over the codebase, again with fresh themes per pass
+(update-checker truthfulness, unwrapper precision, engine strip-list vs.
+functional query params, exception safety, lifecycle, accessibility, `@match`
+coverage, mock-API completeness, async hardening, full re-review).
+
+### Pass 1 — Update checker truthfulness (headline fix)
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | **The update checker lied.** `updateRules()` converted every failure (all 3 feeds down, SHA-256 mismatch, unparseable payload, structural rejection) into a *resolved* promise with no payload — so the dashboard "Check for updates now" button always showed **"Updated successfully"**, and the GM menu item was fire-and-forget. A user could believe their rules were fresh while running month-old embedded ones | **FIXED** — result-string contract (`updated`/`current`/`failed`/`busy`/`skipped`) threaded through the whole promise chain; button renders the real outcome with matching colors; manual feeds share the failure backoff honestly |
+| F2 | No persisted evidence of updater health — after closing the dashboard there was no way to know when the last check ran or what it did | **FIXED** — new `rulesLastCheck` + `rulesLastResult` keys, surfaced as "Last Update Check" / "Last Update Result" rows in the Rules tab; included in factory reset |
+| F3 | Users can't tell how the *userscript itself* updates | **FIXED** — Rules tab now explains manager-driven updates from the GitHub feed (no new network traffic introduced); `@updateURL`/`@downloadURL` re-verified canonical, still guarded by `meta-check.js` |
+| F4 | Anomalous empty status value could self-label as success | **FIXED** — defensive `status || "failed"` (empty never masquerades as success) |
+
+### Pass 2 — Unwrapper host-boundary precision
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | `unwrapDDG` host test `/duckduckgo\.com$/i` lacked a boundary → matched `notduckduckgo.com`. Real exposure was the **main-world** href setter/window.open path (content world is engine-gated and was already safe) | **FIXED** — `/(?:^|\.)duckduckgo\.com$/i` in both copies; regression tests drive the MW setter with lookalike + genuine hosts |
+| F2 | `unwrapYahoo` `\.?search\.yahoo\.` matched `evilsearch.yahoo.*`; MW `realYahoo` same | **FIXED** — start/dot boundary in both copies |
+| F3 | `unwrapYandex` `\.?yandex\.[a-z]{2,}$` matched `xyandex.com` (defense-in-depth; engine gate already bounded) | **FIXED** — boundary required |
+| F4 | ReDoS fuzz on the 3 replacement tokenizer regexes (200KB inputs) | **VERIFIED OK** — 1ms |
+
+### Pass 3 — Engine strip-list vs. functional query parameters (round's highest user-impact find)
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | **Perplexity strip-list contained `q` — its QUERY parameter.** `stripSERPBar`/pushState wrapping removed it from the URL bar → reload = empty search; shared links destroyed. ("One broken website is worse than ten missed trackers.") | **FIXED** — `q` removed from list; `NT_CASE=perplexity` regression test locks `q` preservation while `s`/`rq`/`copilot` are stripped |
+| F2 | **Walla strip-list contained `q` (same breakage)** | **FIXED** — `q` removed; `NT_CASE=walla` test added; both wired into CI |
+| F3 | Systematic review of all 40+ engine lists against each engine's real query param (google `q`, bing `q`, yahoo `p`, ddg `q`, yandex `text`, baidu `wd`, kagi `q`, metager `eingabe`, goo `MT` (case-sensitive vs `mt`), …) | **VERIFIED OK** — no further collisions |
+
+### Pass 4 — Exception safety on the sanitize hot path
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | `extractGoogleRedirect` called raw `decodeURIComponent` on 14 captures — a malformed escape (`%E0%A4` truncated by a lazy CMS) throws `URIError`, propagating through `sanitizeHrefRaw` | **FIXED** — all decodes via `safeDecode` (content world) / `safeDec` (main world); `meta-check.js` now forbids the raw pattern regressing |
+| F2 | One throwing anchor inside `processBatchQueue` killed the whole idle loop: `isCleanupScheduled` stayed latched and **all future cleaning silently stopped for the page's lifetime** | **FIXED** — per-element try/catch in the queue loop plus a guarded `sanitizeHref` call inside `cleanAnchor` |
+| F3 | Harness test: click pipeline driven with malformed google `/url?q=` wrapper | **VERIFIED** — no throw, link survives |
+
+### Pass 5 — Lifecycle & per-page budgets
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | Hover resolver's GM HEAD request had **no timeout** — a hung request latched `_nt_resolving` forever and permanently burned one of the 25-per-page budget slots | **FIXED** — `timeout: 10000` + `ontimeout` resets the flag |
+| F2 | Pending stat deltas (1.5s debounce) were lost when a tab closed/navigated right after cleaning | **FIXED** — `flushStats()` extracted and called on `pagehide` and `visibilitychange=hidden` |
+| F3 | Stats tab showed counters as-of page load, ignoring other tabs | **FIXED** — renders fresh storage + this tab's pending deltas |
+
+### Pass 6 — Dashboard accessibility & UX
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | No dialog semantics: screen readers saw a styleless div soup | **FIXED** — `role=dialog`, `aria-modal`, `aria-label`, `role=tablist/tab/tabpanel`, `aria-selected` state sync |
+| F2 | No focus management — focus stayed on the page behind the modal and was lost on close | **FIXED** — focus moves to the close button on open; every close path (button/Esc/backdrop/reset) routes through one helper that restores the pre-dialog focus |
+| F3 | Close button was a bare lowercase "x" with no accessible name | **FIXED** — `×` glyph + `aria-label` + tooltip |
+
+### Pass 7 — `@match` coverage vs. handled hosts
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | `extractGoogleRedirect` unwreps `*.cdn.ampproject.org` AMP viewer URLs, but **no `@match` covered it** — landing directly on an AMP cache URL never ran NullTrail | **FIXED** — two `@match` lines added; `meta-check.js` guard added |
+| F2 | `googleweblight.com`/`bing-amp.com` handlers reference defunct services | **KEPT (deliberate)** — zero-cost inert code paths; removing them saves nothing measurable and keeps upstream-familiar behavior |
+
+### Pass 8 — Blocked-API mock completeness
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | Blocked `EventSource` returned `Object.create(prototype)` — inherited `addEventListener` threw "Illegal invocation" on the shell | **FIXED** — no-op `add/removeEventListener/dispatchEvent/onX` surface |
+| F2 | Blocked `WebSocket` returned a bare `{}` — pages calling `.send()/.close()/.addEventListener()` crashed | **FIXED** — full spec-shaped closed-socket stub (`readyState: 3`, no-op methods) |
+
+### Pass 9 — Async hardening & new regression/perf gates
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | Unhandled-promise sweep across `gmFetch`/`firstOK`/`sha256Hex`/dashboard/menu/ad-noise | **VERIFIED OK** — every chain terminates in a rejection branch |
+| F2 | No automated perf canary existed to catch an O(n²) sneaking back into per-link paths | **ADDED** — `tests/perf-check.js`: 3,000 cold cleans + 30,000 LRU hits through the real click listener; current baseline ≈ 90µs cold / 5µs repeat; wired into CI |
+| F3 | `meta-check.js` didn't guard this round's contracts | **ADDED** — AMP `@match`, update-checker contract keys, decode-safety, DDG boundary |
+
+### Pass 10 — Full codebase re-review (4,500+ lines, final pass)
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | `isGoogleHost` first clause `h === location.hostname` makes `cfg.google` always true, keeping relative `/gen_204` blocking armed on ALL sites | **KEPT (deliberate)** — `gen_204` is Google's telemetry endpoint wherever it appears; restricting it would *reduce* protection. The clause also enables `/url?q=` unwrap on redirect-wrapping forums — destination-preserving, precision-safe |
+| F2 | DDG engine list strips settings params (`kp`,`kl`) — user prefs in URL | **KEPT (deliberate)** — matches upstream ClearURLs-derived lists since v1; reverting needs user research, not a silent flip |
+| F3 | GM4 lacks sync `GM_getValue` (falls back to localStorage); Greasemonkey-specific | **DOCUMENTED** — known platform limit, unchanged |
+| F4 | All 10 passes re-run against the final tree; 14 test processes green (core, 5 engine cases, 3 network modes, perf, meta) | **VERIFIED OK** |
+
 ## Round 2 — v2.5.0 (10-pass hunt)
 
 Second full iteration over the codebase with fresh themes per pass.

@@ -1,7 +1,7 @@
 # NullTrail — Universal Tracking & Redirect Scrubber
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.5.0-teal.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.6.0-teal.svg)]()
 [![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)]()
 
 **NullTrail** is an autonomous, high-performance browser privacy engine designed to make your web surfing clean, fast, and secure. 
@@ -16,7 +16,7 @@ It runs silently in the background, sanitizing hyperlinks, bypassing intermediat
 Instantly cleanses web links by stripping tracking garbage and telemetry parameters (such as `utm_*`, `fbclid`, `gclid`, and search query logs) before you click, keeping your browsing profile private.
 
 ### 🔗 Middleman Redirect Bypass
-Automatically resolves and bypasses intermediate tracking links (like search engine redirection wrappers or link shorteners) to take you directly to your actual destination instantly.
+Automatically resolves and bypasses intermediate tracking links (like search engine redirection wrappers, AMP cache viewers, or link shorteners) to take you directly to your actual destination instantly — with strict domain-boundary matching, so lookalike hostnames are never touched.
 
 ### 🔒 Suspicious Location Tracker Blocking
 Hard-blocks known IP-logging and location-tracking services across standard web protocols, including images, background fetch/XHR, beacon telemetry, and WebSockets.
@@ -55,9 +55,16 @@ To install NullTrail, follow these quick steps:
 
 Take control of your privacy with simple keyboard shortcuts anywhere on the web:
 
-* **`Alt + Shift + D`**: Open or close the interactive **NullTrail Dashboard** to adjust settings (or press **`Esc`** to close it).
+* **`Alt + Shift + D`**: Open or close the interactive **NullTrail Dashboard** to adjust settings (or press **`Esc`** to close it). The dashboard is fully keyboard- and screen-reader-friendly: it's a real labelled dialog that grabs focus on open and hands it back to exactly where you were on close.
 * **`Alt + Shift + N`**: Quick-toggle protection state (Enable/Disable) on the current website — takes effect instantly, across content and network protection layers.
 * *Shortcuts never fire while you're typing in a text field — they'll never interrupt your flow.*
+
+---
+
+## 🔄 Updates You Can Trust
+
+* **The userscript itself** updates automatically through your manager (Tampermonkey/Violentmonkey) straight from this repository — zero action needed.
+* **The rule database** self-updates about every 6 days, only downloads when the upstream hash actually changed, and is SHA-256-verified and schema-validated before it can touch your browser. The dashboard's **Rules** tab reports the outcome of every check honestly (installed / already current / failed with auto-retry) — no false "Updated successfully" messages, ever.
 
 ---
 
