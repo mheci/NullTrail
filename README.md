@@ -1,8 +1,8 @@
 # NullTrail — Universal Tracking & Redirect Scrubber
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.0.0-teal.svg)]()
-[![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.0.0-teal.svg)](https://github.com/mheci/NullTrail)
+[![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)](https://raw.githubusercontent.com/mheci/NullTrail/main/NullTrail.user.js)
 
 **NullTrail** is an autonomous, high-performance browser privacy engine designed to make your web surfing clean, fast, and secure. 
 
@@ -19,7 +19,7 @@ It runs silently in the background, sanitizing hyperlinks, bypassing intermediat
 * **🌐 Multilingual consent rejection** — precision-scored classifier understanding 12 languages, buttons-only, accept-wording veto.
 * **🧭 Wider coverage** — JavaScript-driven navigations (`location.assign`), SPA hash-fragment trackers, open shadow DOMs, and (opt-in) same-origin frames are all inside the net now.
 * **🧑‍🤝‍🧑 You're in control** — per-site **dry-run mode**, **timed pause with auto-resume**, per-site overrides, **personas** (Gentle/Balanced/Paranoid), offline settings **import/export**, and **Alt+Shift+C** to copy a clean page URL.
-* **⚡ Faster under the hood** — regex-fusion cut cold-path cleaning ~35%; viewport-first cleaning prioritizes links you can actually click; CI enforces **latency budgets** and a **precision corpus** (22 functional URL patterns — logins, shared searches, product variants — that must pass through byte-identical).
+* **⚡ Faster under the hood** — regex-fusion cut cold-path cleaning ~35%; viewport-first cleaning prioritizes links you can actually click; every release is validated against strict **latency budgets** and a **precision corpus** (22 functional URL patterns — logins, shared searches, product variants — that must pass through byte-identical).
 
 ---
 
