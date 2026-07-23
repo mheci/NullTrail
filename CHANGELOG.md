@@ -2,6 +2,43 @@
 
 All notable changes to NullTrail are documented in this file.
 
+## [2.4.0] — 2026-07-23
+
+**Theme: 10-pass production-hardening audit.** A structured hunt across every
+subsystem (full per-pass findings ledger: [AUDIT.md](AUDIT.md)). 9 real bugs
+fixed, 5 hardenings, and a CI-enforced release-consistency guard. Suite count:
+23 core + 4 engine + 3 network + metadata assertions — all green.
+
+### Fixed
+- **fetch keepalive actually stripped now** — `Request.keepalive` is read-only;
+  the old silent no-op is replaced by rebuilding the Request (`keepalive:false`).
+- **Blocked XHRs fire `loadend`** — libraries awaiting loadend no longer hang.
+- **Main-world config re-read per intercepted call eliminated** — dirty-flag
+  memoization driven by the `nt:cfg` event (was a `getElementById` + attribute
+  read on every fetch/beacon/XHR/href-set on busy pages).
+- **URL userinfo preserved** — `removeFields` no longer drops `user:pass@`
+  credentials from cleaned URLs (was rebuilding from `URL.origin`).
+- **Whitelisting now truly disables main-world protections** — the config
+  payload carries `active`; blocking, unwrapping, and referrer overrides all
+  no-op on disabled sites; `Alt+Shift+N` propagates immediately.
+- **Empty remote ruleset can no longer nuke protection** — a ruleset that
+  compiles to zero providers is rejected, keeping the previous working one.
+- **`gmFetch` fallback timeout** — hung fetch no longer pins the update
+  in-flight flag forever (AbortController, 20s).
+- **Dashboard opens on legacy engines** (`attachShadow` fallback), closes on
+  **Escape**, and reset survives sandboxed frames (`confirm`/`alert` guarded).
+- **Prototype-pollution-adjacent engine cache** — `Object.create(null)`.
+
+### Changed / hardened
+- **`@noframes`** — the engine no longer boots inside every matching ad iframe
+  (googlesyndication/doubleclick): removes the biggest remaining observer
+  overhead on ad-heavy pages. Top-frame protections are unchanged.
+- Unified duplicated IP-logger click/auxclick handlers.
+- Removed dead `decodeURIEncodedMod()`.
+- Added `@supportURL` metadata.
+- `tests/meta-check.js` + CI: version, update URLs, and removed-feature guards.
+- Whitelisted-site engine test: asserts **zero** rewrites when disabled.
+
 ## [2.3.0] — 2026-07-23
 
 **Theme: zero speculative traffic and metered-network friendliness, plus a UX

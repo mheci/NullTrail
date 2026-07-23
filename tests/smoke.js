@@ -199,6 +199,16 @@ async function main() {
     } catch (e) {
         ok(false, "utm/fbclid stripped, id kept (threw: " + e.message + ")");
     }
+    // Regression (v2.4.0): userinfo must survive param cleaning
+    const a2b = makeClickable("https://user:s3cret@example.com/private?utm_campaign=x&view=grid");
+    fire("click", clickEvent(a2b), true);
+    ok(a2b.href === "https://user:s3cret@example.com/private?view=grid",
+        "URL userinfo preserved during cleaning (got: " + a2b.href + ")");
+    // Regression: non-anchor / unchanged links are left fully intact
+    const a2c = makeClickable("https://example.com/noop?id=1");
+    fire("click", clickEvent(a2c), true);
+    ok(a2c.href === "https://example.com/noop?id=1" && a2c.getAttribute("data-nt-orig-href") === null,
+        "already-clean link untouched, no marker written");
 
     // -----------------------------------------------------------------------
     // Test 3: Main-world href setter unwraps the value being assigned
