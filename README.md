@@ -1,7 +1,7 @@
 # NullTrail — Universal Tracking & Redirect Scrubber
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.3.0-teal.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.4.0-teal.svg)]()
 [![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)]()
 
 **NullTrail** is an autonomous, high-performance browser privacy engine designed to make your web surfing clean, fast, and secure. 
@@ -55,8 +55,8 @@ To install NullTrail, follow these quick steps:
 
 Take control of your privacy with simple keyboard shortcuts anywhere on the web:
 
-* **`Alt + Shift + D`**: Open or close the interactive **NullTrail Dashboard** to adjust settings.
-* **`Alt + Shift + N`**: Quick-toggle protection state (Enable/Disable) on the current website.
+* **`Alt + Shift + D`**: Open or close the interactive **NullTrail Dashboard** to adjust settings (or press **`Esc`** to close it).
+* **`Alt + Shift + N`**: Quick-toggle protection state (Enable/Disable) on the current website — takes effect instantly, across content and network protection layers.
 
 ---
 

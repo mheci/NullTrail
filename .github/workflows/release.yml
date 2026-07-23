@@ -42,6 +42,11 @@ jobs:
           NT_METERED=1 NT_ADNOISE=1 NT_NORESPECT=1 node tests/smoke-network.js
           echo "✓ Network-friendliness tests passed!"
 
+      - name: Verify Release Metadata Consistency
+        run: |
+          node tests/meta-check.js
+          echo "✓ Release metadata consistent!"
+
       - name: Verify Userscript Metadata Headers
         run: |
           if ! grep -q "@name" NullTrail.user.js; then

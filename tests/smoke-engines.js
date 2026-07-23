@@ -77,6 +77,8 @@ global.history = {
 };
 
 const _store = new Map();
+// Simulate the site being whitelisted (protection disabled)
+if (process.env.NT_WHITELISTED === "1") _store.set("nt_whitelist", CASES[CASE].hostname);
 global.localStorage = {
     getItem: k => (_store.has(k) ? _store.get(k) : null),
     setItem: (k, v) => { _store.set(k, String(v)); },
@@ -121,7 +123,11 @@ console.log("== Boot complete ==");
 
 // stripSERPBar() ran during boot (readyState "complete" branch)
 const last = replacedUrls[replacedUrls.length - 1];
-ok(last === c.expect, "SERP bar stripped to " + c.expect + " (got: " + last + ")");
+if (process.env.NT_WHITELISTED === "1") {
+    ok(replacedUrls.length === 0, "whitelisted site: ZERO URL rewrites (got: " + replacedUrls.length + ") [got: " + last + "]");
+} else {
+    ok(last === c.expect, "SERP bar stripped to " + c.expect + " (got: " + last + ")");
+}
 
 console.log("\n== Summary ==");
 if (failures.length) { console.log(failures.length + " failure(s)"); process.exit(1); }

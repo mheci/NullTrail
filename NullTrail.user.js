@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         NullTrail — Universal Tracking & Redirect Scrubber
 // @namespace    https://github.com/nulltrail
-// @version      2.3.0
+// @version      2.4.0
 // @description  Fix the web.
 // @license      Unlicense
+// @supportURL   https://github.com/mheci/NullTrail/issues
 // @author       NullTrail
 // @icon         data:image/jpeg;base64,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
 // @run-at       document-start
@@ -15,6 +16,7 @@
 // @grant        unsafeWindow
 // @connect      rules1.clearurls.xyz
 // @connect      rules2.clearurls.xyz
+// @noframes
 // @match        *://*.bing.com/*
 // @match        *://bing.com/*
 // @match        *://*.duckduckgo.com/*
@@ -1313,8 +1315,15 @@
                 const gb = b.urlPattern && b.urlPattern.source === ".*" ? 1 : 0;
                 return ga - gb;
             });
-            PROVIDERS = arr;
-            log("rules loaded:", arr.length, "providers");
+            // Hardening (v2.4.0): never swap a working ruleset for an empty one.
+            // If every remote provider failed to compile, keep the current rules —
+            // otherwise all stripping would silently stop until the next update.
+            if (arr.length > 0) {
+                PROVIDERS = arr;
+                log("rules loaded:", arr.length, "providers");
+            } else {
+                log("no valid providers compiled — keeping existing rules");
+            }
         } catch (e) {
             log("setRules error", e);
         }
@@ -1375,14 +1384,7 @@
         }
     }
 
-    function decodeURIEncodedMod(s) {
-        try {
-            return decodeURIComponent(s.replace(/%2D/g, "-").replace(/%5F/g, "_").replace(/%2E/g, ".").replace(/%21/g, "!").replace(/%7E/g, "~").replace(/%2A/g, "*").replace(/%27/g, "'").replace(/%28/g, "(").replace(/%29/g, ")"));
-        } catch (e) {
-            return s;
-        }
-    }
-
+    // Removed in v2.4.0: decodeURIEncodedMod() — defined but never called (dead code).
     const IP_LOGGERS = /(?:^|\.)(?:grabify\.link|leancoding\.co|stopify\.co|freegiftcards\.co|joinmy\.site|curiouscat\.club|catsnthings\.(fun|com)|xn--yutube-iqc\.com|gyazo\.(in|nl)|yip\.su|iplogger\.(com|co|org|ru|info|net|de|cn|pl|se|uk|biz|tk|ml|ga|cf)|ipgraber\.ru|ipgrabber\.ru|2no\.co|02ip\.ru|iplis\.ru|iplo\.ru|ezstat\.ru|whatstheirip\.com|partpicker\.shop|sportshub\.bar|locations\.quest|lovebird\.guru|trulove\.guru|dateing\.club|shrekis\.life|headshot\.monster|gaming-at-my\.best|progaming\.monster|yourmy\.monster|imageshare\.best|screenshot\.best|gamingfun\.me|catsnthing\.com|fortnitechat\.site|fortnight\.space|hondachat\.com|bvog\.com|youramonkey\.com|pronosparadise\.com|freebooter\.pro|blasze\.(com|tk)|ipgrab\.org|gyazos\.com|viral\.over-blog\.com|ps3cfw\.com|urlz\.fr|webpanel\.space|steamcommumity\.com|imgur\.com\.de|fuglekos\.com|discord\.kim|prntcrs\.com|iptrace\.(com|net|org)|iptrack\.(com|net)|iplog\.(com|net|info|ru|cn)|ip-sniffer\.(com|net)|ipfinder\.(com|net|info|cc)|findmyip\.(com|net|org|info)|locateip\.(com|net|info|org)|trackip\.(com|net|org|info)|traceip\.(com|net|org|info)|extreme-ownage\.(com|net|org|tk|ml|ga|cf)|ipgun\.(com|net|org|info|tk)|ipshot\.(com|net|info|org)|ipcatcher\.(com|net|info|org)|visitor\.(com|net|info|org|biz|cc|tk|ml|ga|cf)|ip\.gd|ip\.sh|ip\.io|ip\.fyi|ip\.info)$/;
 
     function isIPLogger(href) {
@@ -1486,7 +1488,11 @@
             }
         }
         if (removed === 0) return url;
-        let out = urlObj.origin + urlObj.pathname;
+        // Bug Fix (v2.4.0): URL.origin omits userinfo — rebuilding from it
+        // silently dropped "user:pass@" credentials from cleaned URLs.
+        let out = urlObj.protocol + "//" +
+            (urlObj.username ? urlObj.username + (urlObj.password ? ":" + urlObj.password : "") + "@" : "") +
+            urlObj.host + urlObj.pathname;
         const fs = fields.toString(), hs = fragments.toString();
         if (fs) out += "?" + fs;
         if (hs) out += "#" + hs;
@@ -1566,9 +1572,21 @@
                     ontimeout: () => reject(new Error("timeout"))
                 });
             } else if (typeof fetch === "function") {
-                fetch(url).then(r => {
+                // Bug Fix (v2.4.0): the fetch fallback previously had NO timeout,
+                // unlike the GM path — a hung connection would leave updateRules'
+                // in-flight flag set forever, silently ending all future updates.
+                let ctrl = null;
+                try { ctrl = new AbortController(); } catch (e) {}
+                const timer = ctrl ? setTimeout(function() {
+                    try { ctrl.abort(); } catch (e) {}
+                }, 20000) : null;
+                const clear = () => { if (timer) clearTimeout(timer); };
+                fetch(url, ctrl ? { signal: ctrl.signal } : undefined).then(r => {
                     return r.text().then(t => ({ status: r.status, text: t }));
-                }).then(resolve, reject);
+                }).then(
+                    v => { clear(); resolve(v); },
+                    e => { clear(); reject(e); }
+                );
             } else {
                 reject(new Error("no transport"));
             }
@@ -1922,7 +1940,9 @@
         s: [ "e", "q", "l" ]
     } ];
 
-    const _engineCache = {};
+    // Hardening (v2.4.0): null-prototype map — hostname keys are attacker-influenced
+    // (any URL's host), so a plain {} could be prototype-mutated by crafted names.
+    const _engineCache = Object.create(null);
     function getEngine(host) {
         if (!host) return null;
         if (Object.prototype.hasOwnProperty.call(_engineCache, host)) return _engineCache[host];
@@ -2464,9 +2484,12 @@
 
     function blockIPLoggerNav() {
         if (!CFG.blockIPLoggers) return;
-        document.addEventListener("click", function(e) {
-            let el = e.target;
-            while (el && !el.href) el = el.parentElement;
+        // Deduplicated (v2.4.0): both listeners were the same 10-line handler.
+        // auxclick additionally guards on middle-button so right-click menu
+        // actions aren't disturbed unnecessarily.
+        function neutralizeIPLoggerClick(e) {
+            if (e.type === "auxclick" && e.button !== 1) return;
+            const el = findAnchor(e.target);
             if (el && el.href && isIPLogger(el.href)) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -2474,17 +2497,9 @@
                 bumpStats(0, 1);
                 log("blocked IP-logger navigation:", el.href);
             }
-        }, true);
-        document.addEventListener("auxclick", function(e) {
-            let el = e.target;
-            while (el && !el.href) el = el.parentElement;
-            if (el && el.href && isIPLogger(el.href)) {
-                e.preventDefault();
-                e.stopPropagation();
-                el.setAttribute("data-nt-blocked-iplogger", "true");
-                bumpStats(0, 1);
-            }
-        }, true);
+        }
+        document.addEventListener("click", neutralizeIPLoggerClick, true);
+        document.addEventListener("auxclick", neutralizeIPLoggerClick, true);
     }
 
     function enforceMetaReferrer() {
@@ -2528,6 +2543,7 @@
         const NavigatorProto = win.Navigator.prototype;
 
         let cfg = {
+            active: true,
             forceNoReferrer: true,
             referrerPolicy: "origin",
             noping: true,
@@ -2540,23 +2556,33 @@
             unblockTextSelection: false
         };
         let _rawCfg = null;
+        // Perf Fix (v2.4.0): steady-state memoization. loadCfg() previously ran a
+        // getElementById + attribute read on EVERY intercepted fetch / beacon /
+        // XHR open / href assignment (i.e. hundreds of DOM queries per page).
+        // The "nt:cfg" event already signals changes, so in between changes we
+        // skip the DOM entirely. Stays dirty while the meta tag is absent so the
+        // document-start race (boot before pushConfigToPage) still resolves.
+        let _cfgDirty = true;
 
         function loadCfg() {
+            if (!_cfgDirty) return;
             try {
                 const m = doc.getElementById("nt-config");
-                if (m) {
-                    const raw = m.getAttribute("content");
-                    if (raw && raw !== _rawCfg) {
-                        _rawCfg = raw;
-                        const j = JSON.parse(decodeURIComponent(escape(atob(raw))));
-                        if (j) cfg = j;
-                    }
+                if (!m) return; // keep dirty — config meta not injected yet
+                const raw = m.getAttribute("content");
+                if (raw && raw !== _rawCfg) {
+                    _rawCfg = raw;
+                    const j = JSON.parse(decodeURIComponent(escape(atob(raw))));
+                    if (j) cfg = j;
                 }
+                _cfgDirty = false;
             } catch (e) {}
         }
         loadCfg();
 
         doc.addEventListener("nt:cfg", function() {
+            // Config changed in the content world: invalidate and reload.
+            _cfgDirty = true;
             _rawCfg = null;
             loadCfg();
         }, true);
@@ -2568,6 +2594,7 @@
 
         function policy() {
             loadCfg();
+            if (!cfg.active) return ""; // disabled on this site — no referrer overrides (v2.4.0)
             return cfg.forceNoReferrer ? (cfg.referrerPolicy === "no-referrer" ? "no-referrer" : "origin") : "";
         }
 
@@ -2648,6 +2675,8 @@
         }
 
         function realLink(a) {
+            loadCfg(); // memoized — near-free after first load (v2.4.0)
+            if (!cfg.active) return null; // disabled on this site — no rewriting (v2.4.0)
             const r = realGoogle(a) || realBing(a) || realYahoo(a) || realDDG(a) || realSearx(a);
             if (r && !isGoodLinkMW(r)) return null;
             return r;
@@ -2948,6 +2977,7 @@
         const BLANK_GIF = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
 
         function shouldBlock(url) {
+            if (!cfg.active) return false; // whitelist / global pause disables blocking (v2.4.0)
             if (!url) return false;
             const s = String(url);
             if (cfg.google && cfg.blockGA && GA.test(s)) return "ga";
@@ -2991,14 +3021,21 @@
                         if (shouldBlock(u)) {
                             return Promise.resolve(new Response("", { status: 204 }));
                         }
-                        if (cfg.blockKeepalive && opts && opts.keepalive) {
-                            try { opts.keepalive = false; } catch (e) {}
-                        }
-                        if (cfg.blockKeepalive && input && typeof input === "object" && input.keepalive) {
-                            try { input.keepalive = false; } catch (e) {}
+                        if (cfg.blockKeepalive) {
+                            // Bug Fix (v2.4.0): Request.keepalive is READ-ONLY — the
+                            // old code's `input.keepalive = false` silently no-opped,
+                            // so keepalive was never stripped from Request objects.
+                            // Rebuild the Request with keepalive:false instead.
+                            try {
+                                if (opts && opts.keepalive) {
+                                    opts.keepalive = false;
+                                } else if (input && typeof input === "object" && input.keepalive) {
+                                    input = new win.Request(input, { keepalive: false });
+                                }
+                            } catch (e) {}
                         }
                     } catch (e) {}
-                    return fa(this, arguments);
+                    return fa(this, [ input, opts ]);
                 };
                 win.fetch = fakeFetch;
                 camouflage(fakeFetch, f);
@@ -3036,6 +3073,10 @@
                             self.dispatchEvent(new Event("readystatechange"));
                             self.dispatchEvent(new Event("load"));
                             if (typeof self.onload === "function") self.onload();
+                            // Bug Fix (v2.4.0): libraries awaiting "loadend" never
+                            // resolved — it wasn't dispatched for blocked XHRs.
+                            self.dispatchEvent(new Event("loadend"));
+                            if (typeof self.onloadend === "function") self.onloadend();
                         } catch (e) {}
                     }, 0);
                     return;
@@ -3261,6 +3302,10 @@
                 (document.head || document.documentElement).appendChild(m);
             }
             const payload = {
+                // Bug Fix (v2.4.0): include the site's active flag so whitelisting
+                // truly disables main-world protections too (they previously kept
+                // blocking beacons/XHR/fetch and forcing referrer policy).
+                active: isActive(),
                 forceNoReferrer: CFG.forceNoReferrer,
                 referrerPolicy: CFG.referrerPolicy,
                 noping: CFG.noping,
@@ -3957,10 +4002,31 @@
         }
         
         // Shadow DOM Container (Isolates settings styling completely from the host page)
+        // Hardening (v2.4.0): fall back to a plain container if attachShadow is
+        // unavailable (legacy engines) instead of failing to open at all.
         const container = document.createElement("div");
         container.id = "nt-dashboard-root";
-        
-        const shadow = container.attachShadow({ mode: "closed" });
+
+        let shadow;
+        try {
+            shadow = container.attachShadow({ mode: "closed" });
+        } catch (e) {
+            shadow = container;
+        }
+
+        // UX (v2.4.0): Escape closes the dashboard.
+        function onEsc(e) {
+            if (!container.isConnected) {
+                document.removeEventListener("keydown", onEsc, true);
+                return;
+            }
+            if (e.key === "Escape") {
+                e.stopPropagation();
+                try { container.remove(); } catch (err) {}
+                document.removeEventListener("keydown", onEsc, true);
+            }
+        }
+        document.addEventListener("keydown", onEsc, true);
         
         const ov = ntEl("div", null, "position:fixed;inset:0;z-index:2147483647;background:rgba(10,12,20,.6);display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif");
         ov.id = "nt-dashboard";
@@ -3968,7 +4034,7 @@
         const hdr = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06)");
         const hdrLeft = ntEl("div", null, "display:flex;flex-direction:column");
         hdrLeft.appendChild(ntEl("span", "NullTrail", "font-size:17px;font-weight:700;color:#14b8a6"));
-        hdrLeft.appendChild(ntEl("span", "v2.3.0", "font-size:11px;color:#6b7280;margin-top:2px"));
+        hdrLeft.appendChild(ntEl("span", "v2.4.0", "font-size:11px;color:#6b7280;margin-top:2px"));
         hdr.appendChild(hdrLeft);
         const closeBtn = ntEl("button", "x", "background:none;border:none;color:#9ca3af;font-size:22px;cursor:pointer;padding:0 4px;line-height:1");
         closeBtn.title = "Close";
@@ -4190,7 +4256,7 @@
         }
 
         function renderAbout() {
-            content.appendChild(ntEl("div", "NullTrail v2.3.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "NullTrail v2.4.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
             content.appendChild(ntEl("div", "An autonomous, zero-jargon browser privacy engine fusing advanced hyperlink scrubbing, tracking parameter deletion, fast-forward redirect unwrapping, and strict analytical API shielding.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:14px"));
             const features = [ 
                 "40+ Search Engine Redirect unwrapping & sanitization", 
@@ -4210,9 +4276,14 @@
             content.appendChild(ntEl("div", "Alt + Shift + D  —  Open / Close this settings dashboard", "font-size:12px;color:#dfe4ee;padding:3px 0"));
             const resetBtn = ntEl("button", "Reset all settings to default", "margin-top:16px;padding:8px 16px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#ef4444;font-size:12px;cursor:pointer");
             resetBtn.addEventListener("click", function() {
-                if (confirm("Are you sure you want to reset all NullTrail settings, whitelist sites, and cached rule databases?")) {
+                // Hardening (v2.4.0): confirm/alert can throw in sandboxed frames.
+                let agreed = false;
+                try {
+                    agreed = window.confirm("Are you sure you want to reset all NullTrail settings, whitelist sites, and cached rule databases?");
+                } catch (e) {}
+                if (agreed) {
                     [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation", "serverRedirectResolution", "respectMetered", "rulesNextTry" ].forEach(DV);
-                    alert("Settings successfully reset. Please reload the webpage.");
+                    try { window.alert("Settings successfully reset. Please reload the webpage."); } catch (e) {}
                     container.remove();
                 }
             });
@@ -4234,6 +4305,7 @@
             e.stopPropagation();
             if (isWhitelisted(location.hostname)) removeWhitelist(location.hostname); 
             else addWhitelist(location.hostname);
+            pushConfigToPage(); // propagate enabled/disabled state to the page world (v2.4.0)
         }
         if (e.altKey && e.shiftKey && (e.key === "D" || e.key === "d" || e.code === "KeyD")) {
             e.preventDefault();
@@ -4356,5 +4428,5 @@
     setTimeout(function() { updateRules(false); }, 3000);
     setInterval(function() { updateRules(false); }, 6 * 3600 * 1000);
 
-    log("NullTrail v2.3.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
+    log("NullTrail v2.4.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
 })();
