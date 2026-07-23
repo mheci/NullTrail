@@ -27,6 +27,14 @@ jobs:
           node --check NullTrail.user.js
           echo "✓ Userscript syntax is perfectly valid!"
 
+      - name: Run Regression Harness (core)
+        run: |
+          node tests/smoke.js
+          for c in bing google duckduckgo; do
+            NT_CASE=$c node tests/smoke-engines.js
+          done
+          echo "✓ All regression tests passed!"
+
       - name: Verify Userscript Metadata Headers
         run: |
           if ! grep -q "@name" NullTrail.user.js; then

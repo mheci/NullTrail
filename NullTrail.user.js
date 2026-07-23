@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NullTrail — Universal Tracking & Redirect Scrubber
 // @namespace    https://github.com/nulltrail
-// @version      2.1.0
+// @version      2.2.0
 // @description  Fix the web.
 // @license      Unlicense
 // @author       NullTrail
@@ -1063,14 +1063,21 @@
         statistics: GV("statistics", true),
         logging: GV("logging", false),
         debug: GV("debug", false),
-        activeAdObfuscation: GV("activeAdObfuscation", false)
+        activeAdObfuscation: GV("activeAdObfuscation", false),
+        // Disabled by default: resolving server-side redirects on hover requires
+        // firing background requests at third-party servers, which leaks hover
+        // intent. Users who want FastForward-style multi-hop resolution can opt in.
+        serverRedirectResolution: GV("serverRedirectResolution", false)
     };
 
     let WHITELIST = GV("whitelist", "");
 
     // User-requested site-specific settings maps
     let unblockContextMenuSites = GV("unblockContextMenuSites", {});
-    let unblockTextSelectionSites = GV("unblockTextSelectionSites", "activeAdObfuscation", {});
+    // Bug Fix (v2.2.0): default was the string "activeAdObfuscation" (bad copy-paste).
+    // In strict mode, assigning a site key onto a string primitive throws, which made
+    // the dashboard "text selection" toggle fail silently on first use.
+    let unblockTextSelectionSites = GV("unblockTextSelectionSites", {});
 
     function isWhitelisted(host) {
         if (!host || !WHITELIST) return false;
@@ -1111,37 +1118,35 @@
         SV("whitelist", WHITELIST);
     }
 
-    // LRU Cache for URL Sanitization
+    // LRU Cache for URL Sanitization.
+    // Perf Fix (v2.2.0): Map-backed LRU — O(1) get/set/evict instead of the old
+    // O(n) indexOf/splice/shift scans on every lookup, and it cannot be confused
+    // by special keys like "__proto__" the way a plain object could.
     const LRU_MAX = 384;
-    const _lruKeys = [];
-    const _lruMap = {};
+    const _lruCache = new Map();
 
     function lruGet(key) {
-        if (Object.prototype.hasOwnProperty.call(_lruMap, key)) {
-            const i = _lruKeys.indexOf(key);
-            if (i > -1) {
-                _lruKeys.splice(i, 1);
-                _lruKeys.push(key);
-            }
-            return { hit: true, val: _lruMap[key] };
+        if (_lruCache.has(key)) {
+            const val = _lruCache.get(key);
+            // Refresh recency: delete + set moves the key to the newest position.
+            _lruCache.delete(key);
+            _lruCache.set(key, val);
+            return { hit: true, val: val };
         }
         return { hit: false, val: undefined };
     }
 
     function lruSet(key, val) {
-        if (Object.prototype.hasOwnProperty.call(_lruMap, key)) {
-            _lruMap[key] = val;
-            const i = _lruKeys.indexOf(key);
-            if (i > -1) _lruKeys.splice(i, 1);
-            _lruKeys.push(key);
-            return;
+        if (_lruCache.has(key)) _lruCache.delete(key);
+        _lruCache.set(key, val);
+        while (_lruCache.size > LRU_MAX) {
+            // Map preserves insertion order: first key is the oldest.
+            _lruCache.delete(_lruCache.keys().next().value);
         }
-        _lruMap[key] = val;
-        _lruKeys.push(key);
-        while (_lruKeys.length > LRU_MAX) {
-            const k = _lruKeys.shift();
-            delete _lruMap[k];
-        }
+    }
+
+    function lruClear() {
+        _lruCache.clear();
     }
 
     const STATS = {
@@ -1275,8 +1280,14 @@
                     log("bad provider", k, e);
                 }
             });
+            // Bug Fix (v2.2.0): the old comparator returned -1 for every pair where
+            // `a` was not the global provider — an inconsistent ordering relation that
+            // made provider order engine-dependent. Weight-based comparator keeps the
+            // global (".*") provider last deterministically.
             arr.sort((a, b) => {
-                return a.urlPattern && a.urlPattern.source === ".*" ? 1 : -1;
+                const ga = a.urlPattern && a.urlPattern.source === ".*" ? 1 : 0;
+                const gb = b.urlPattern && b.urlPattern.source === ".*" ? 1 : 0;
+                return ga - gb;
             });
             PROVIDERS = arr;
             log("rules loaded:", arr.length, "providers");
@@ -1561,31 +1572,68 @@
         }
     }
 
+    let _updatingRules = false;
+
     function updateRules(force) {
         if (!CFG.autoUpdateRules && !force) return Promise.resolve();
+        // In-flight guard: boot, the 6-hour interval, and manual dashboard updates
+        // could otherwise run duplicate parallel downloads of the same ~200KB feed.
+        if (_updatingRules) return Promise.resolve();
         if (!force) {
             const last = GV("rulesUpdated", 0) | 0;
             if (last && Date.now() - last < UPDATE_INTERVAL) return Promise.resolve();
         }
+        _updatingRules = true;
         return firstOK(HASH_URLS).then(hr => {
             const remoteHash = (hr.text || "").trim().toLowerCase();
+            // Bandwidth fix (v2.2.0): if the remote hash matches our cached rules we
+            // can skip downloading the full ~200KB data file entirely. The old code
+            // always downloaded it and only verified the fresh copy.
+            const cachedHash = String(GV("rulesHash", "")).toLowerCase();
+            if (remoteHash && cachedHash === remoteHash && GV("rulesData", null)) {
+                SV("rulesUpdated", Date.now());
+                log("rules already up to date");
+                return;
+            }
             return firstOK(RULE_URLS).then(dr => {
                 const dataText = (dr.text || "").trim();
-                return sha256Hex(dataText).then(digest => {
-                    if (remoteHash && digest !== remoteHash) {
+                const accept = digest => {
+                    if (remoteHash && digest && digest !== remoteHash) {
                         log("rule hash mismatch");
                         return;
                     }
-                    const data = JSON.parse(dataText);
+                    let data;
+                    try {
+                        data = JSON.parse(dataText);
+                    } catch (e) {
+                        log("rule parse failed");
+                        return;
+                    }
+                    // Never replace a working ruleset with structurally invalid data.
+                    if (!data || !data.providers || Object.keys(data.providers).length === 0) {
+                        log("rule payload invalid");
+                        return;
+                    }
                     SV("rulesData", data);
-                    SV("rulesHash", digest);
+                    if (digest) SV("rulesHash", digest);
                     SV("rulesUpdated", Date.now());
                     setRules(data);
                     log("rules updated from feed");
-                });
+                };
+                // crypto.subtle is unavailable in insecure (http://) contexts. The
+                // hash file is served from the same trusted origin as the data, so
+                // skipping verification there changes nothing security-wise.
+                if (typeof crypto !== "undefined" && crypto.subtle && remoteHash) {
+                    return sha256Hex(dataText).then(accept, () => accept(null));
+                }
+                return accept(null);
             });
         }).catch(e => {
             log("rule update failed:", e && e.message);
+        }).then(() => {
+            _updatingRules = false;
+        }, () => {
+            _updatingRules = false;
         });
     }
 
@@ -1605,12 +1653,15 @@
         }
     }
 
+    // Bug Fix (v2.2.0): 'core' must be mutable — padding a const threw a strict-mode
+    // TypeError, silently breaking all Bing click-through unwrapping. Host gate now also
+    // covers ecosia.org, whose engine entry references this unwrapper (previously dead config).
     function unwrapBing(u) {
-        if (!u || !/bing\.com$/i.test(u.hostname)) return null;
+        if (!u || !/(?:^|\.)(?:bing\.com|ecosia\.org)$/i.test(u.hostname)) return null;
         if (u.pathname !== "/ck/a" && u.pathname !== "/ck/d") return null;
         const m = /[?&]u=([A-Za-z0-9_+/=\-]*)/.exec(u.search);
         if (!m) return null;
-        const core = m[1].replace(/^[a-z][0-9]/i, "").replace(/-/g, "+").replace(/_/g, "/");
+        let core = m[1].replace(/^[a-z][0-9]/i, "").replace(/-/g, "+").replace(/_/g, "/");
         while (core.length % 4) core += "=";
         const dec = safeAtob(core);
         if (dec && /^https?:\/\//i.test(dec)) return dec;
@@ -1662,7 +1713,9 @@
     // Critical Patch: Do not block functional routing parameters 'ia' and 'iai' on DuckDuckGo
     const ENGINES = [ {
         n: "google",
-        h: /\.google\.(?:[a-z]{2,3})(?:\.[a-z]{2})?$/i,
+        // Bug Fix (v2.2.0): old pattern required a subdomain prefix (".google."),
+        // so the bare apex "google.com" was never recognized as an engine host.
+        h: /(?:^|\.)google\.(?:[a-z]{2,3})(?:\.[a-z]{2})?$/i,
         s: [ "ei", "ved", "sca_esv", "iflsig", "gs_lp", "oq", "gs_lcrp", "uact", "source", "sourceid", "aqs", "sugexp", "npsic", "zx", "no_sw_cr", "sei", "bih", "biw", "noj", "pws", "nfpr", "prmd", "prmdo", "rlz", "sxsrf", "cs", "gfe_rd", "tbo", "sa", "usg", "sig2", "rct", "cd", "sqi", "dpr", "cad", "btnG", "gbv", "gs_gbr", "bs", "ijn" ]
     }, {
         n: "bing",
@@ -2108,6 +2161,31 @@
         return res;
     }
 
+    // Strips the active engine's known tracking parameters from a URL object in place.
+    // Deduplicated (v2.2.0): stripSERPBar() and the history.pushState wrapper below
+    // previously each carried their own copy of this loop.
+    function stripEngineSearchParams(u, eng) {
+        if (!eng || !eng.s) return false;
+        let changed = false;
+        const params = eng.s;
+        const allKeys = Array.from(u.searchParams.keys());
+        allKeys.forEach(k => {
+            if (k.indexOf("rsv_") === 0) {
+                u.searchParams.delete(k);
+                changed = true;
+                return;
+            }
+            for (let i = 0; i < params.length; i++) {
+                if (k === params[i]) {
+                    u.searchParams.delete(k);
+                    changed = true;
+                    break;
+                }
+            }
+        });
+        return changed;
+    }
+
     let _serpBusy = false;
     function stripSERPBar() {
         if (!CFG.stripSERPParams || _serpBusy || !isActive()) return;
@@ -2115,24 +2193,7 @@
         if (!eng || !eng.s) return;
         try {
             const u = new URL(location.href);
-            let changed = false;
-            const params = eng.s;
-            const allKeys = Array.from(u.searchParams.keys());
-            allKeys.forEach(k => {
-                if (k.indexOf("rsv_") === 0) {
-                    u.searchParams.delete(k);
-                    changed = true;
-                    return;
-                }
-                for (let i = 0; i < params.length; i++) {
-                    if (k === params[i]) {
-                        u.searchParams.delete(k);
-                        changed = true;
-                        break;
-                    }
-                }
-            });
-            if (changed) {
+            if (stripEngineSearchParams(u, eng)) {
                 _serpBusy = true;
                 history.replaceState(history.state, "", u.toString());
                 _serpBusy = false;
@@ -2326,23 +2387,26 @@
             if (/(^|\.)reddit\.com$/.test(h)) {
                 setCookie("eu_cookie", "{%22opted%22:true}", 365);
             }
-            if (/(^|\\.)(twitter|x)\\.com$/.test(h)) {
+            // Bug Fix (v2.2.0): the four rules below used double-escaped dots ("\\."),
+            // which match a literal backslash + any char — never a hostname dot —
+            // so the Twitter/X, TikTok, Spotify and LinkedIn presets never fired.
+            if (/(^|\.)(twitter|x)\.com$/.test(h)) {
                 setCookie("personalization_id", "", -1);
             }
             if (/(^|\.)facebook\.com$/.test(h)) {
                 setCookie("dpr", "1", 365);
                 setCookie("wd", "1280x720", 365);
             }
-            if (/(^|\\.)tiktok\\.com$/.test(h)) {
+            if (/(^|\.)tiktok\.com$/.test(h)) {
                 setCookie("tt_cs_1", "", -1);
             }
             if (/(^|\.)amazon\.[a-z.]+$/.test(h)) {
                 setCookie("ad-id", "", -1);
             }
-            if (/(^|\\.)(spotify)\\.com$/.test(h)) {
+            if (/(^|\.)(spotify)\.com$/.test(h)) {
                 setCookie("sp_t", "", -1);
             }
-            if (/(^|\\.)(linkedin)\\.com$/.test(h)) {
+            if (/(^|\.)(linkedin)\.com$/.test(h)) {
                 setCookie("li_gc", "LTsT1NG12RrXkhWvAWW18g==", 365);
             }
             if (/(^|\.)(nytimes|washingtonpost)\.com$/.test(h)) {
@@ -2402,6 +2466,15 @@
     function ntMainWorldBoot(win) {
         "use strict";
         win = win || window;
+        // Idempotency guard (v2.2.0): this bootstrapper previously ran 2–3 times per
+        // page (script-tag injection + direct unsafeWindow call + nonce retry path),
+        // stacking duplicate wrappers on fetch / XHR / sendBeacon / href and doubling
+        // per-call overhead on hot page APIs. Mark the realm and bail on re-entry.
+        // If the marker cannot be defined we still boot — protection beats idempotency.
+        try {
+            if (win.__ntMWBooted) return;
+            Object.defineProperty(win, "__ntMWBooted", { configurable: true, value: true });
+        } catch (e) {}
         const doc = win.document;
         const nav = win.navigator;
         const ElementProto = win.Element.prototype;
@@ -2482,11 +2555,11 @@
         }
 
         function realBing(a) {
-            if (!/bing\.com$/i.test(a.hostname)) return null;
+            if (!/(?:^|\.)(?:bing\.com|ecosia\.org)$/i.test(a.hostname)) return null;
             if (a.pathname !== "/ck/a" && a.pathname !== "/ck/d") return null;
             const m = /[?&]u=([A-Za-z0-9_+/=\-]*)/.exec(a.search);
             if (!m) return null;
-            const core = m[1].replace(/^[a-z][0-9]/i, "").replace(/-/g, "+").replace(/_/g, "/");
+            let core = m[1].replace(/^[a-z][0-9]/i, "").replace(/-/g, "+").replace(/_/g, "/");
             while (core.length % 4) core += "=";
             const d = safeAtob(core);
             return d && /^https?:\/\//i.test(d) ? d : null;
@@ -2639,15 +2712,28 @@
                     },
                     set: function(v) {
                         this._nt_orig = String(v);
+                        // Bug Fix (v2.2.0): any fresh assignment invalidates the stored
+                        // original-href marker. Without this, a page re-assigning href on
+                        // an anchor NullTrail had cleaned earlier would keep seeing (and
+                        // getting) the STALE original URL from a previous destination.
+                        // The content world re-sets the marker right after its own assigns.
+                        try { this.removeAttribute("data-nt-orig-href"); } catch (e) {}
                         let target = v;
                         try {
-                            const r = realLink(this);
+                            // Bug Fix (v2.2.0): resolve the value BEING ASSIGNED. The old
+                            // code inspected the element's *current* href, which is stale
+                            // at assignment time and could overwrite the new value with a
+                            // redirect extracted from the old one.
+                            const assignUrl = new win.URL(String(v), win.location.href);
+                            const r = realLink(assignUrl);
                             if (r) target = r;
                         } catch (e) {}
                         hset(this, target);
                         updateRP(this);
                     }
                 };
+                camouflage(fakeHrefDescriptor.get, hp.get);
+                camouflage(fakeHrefDescriptor.set, hp.set);
                 Object.defineProperty(HTMLAnchorElementProto, "href", fakeHrefDescriptor);
             }
             
@@ -2943,6 +3029,8 @@
                         is(this, v);
                     }
                 };
+                camouflage(fakeImageSrcDescriptor.get, ip.get);
+                camouflage(fakeImageSrcDescriptor.set, ip.set);
                 Object.defineProperty(HTMLImageElementProto, "src", fakeImageSrcDescriptor);
             }
         } catch (e) {}
@@ -2963,6 +3051,7 @@
                         return Reflect.construct(T, args);
                     }
                 });
+                camouflage(fakeEventSource, EventSourceRef);
                 win.EventSource = fakeEventSource;
             }
         } catch (e) {}
@@ -3028,6 +3117,7 @@
                         return Reflect.construct(T, args);
                     }
                 });
+                camouflage(fakeWebSocket, WebSocketRef);
                 win.WebSocket = fakeWebSocket;
             }
         } catch (e) {}
@@ -3158,6 +3248,12 @@
     function cleanAnchor(el) {
         if (!el || !el.href || LOCK.has(el)) return;
         if (!isActive()) return;
+        // Perf Fix (v2.2.0): PROCESSED is now an href memo instead of dead code.
+        // MutationObservers re-queue the same node repeatedly (childList + attribute
+        // records); without this memo every re-queue re-ran the full sanitize and
+        // attribute sweep even when the href was unchanged.
+        const hrefNow = el.href;
+        if (PROCESSED.get(el) === hrefNow) return;
         LOCK.add(el);
         try {
             if (isIPLogger(el.href)) {
@@ -3165,6 +3261,7 @@
                 el.removeAttribute("ping");
                 el.removeAttribute("onmousedown");
                 applyRP(el);
+                PROCESSED.set(el, hrefNow);
                 return;
             }
             if (CFG.noping && el.hasAttribute && el.hasAttribute("ping")) el.removeAttribute("ping");
@@ -3177,10 +3274,14 @@
             const cleaned = sanitizeHref(orig);
             const didChange = cleaned && cleaned !== orig;
             if (didChange) {
-                try { 
-                    // Critical Compatibility Mitigation: Store original href in data-nt-orig-href so website JS still sees what it expects
+                try {
+                    // Critical Compatibility Mitigation: store the original href in
+                    // data-nt-orig-href so website JS still sees what it expects.
+                    // Order matters (v2.2.0): the main-world href setter now clears this
+                    // marker on every assignment, so the marker must be (re)applied AFTER
+                    // assigning the cleaned URL.
+                    el.href = cleaned;
                     el.setAttribute("data-nt-orig-href", orig);
-                    el.href = cleaned; 
                 } catch (e) {}
             }
             applyRP(el);
@@ -3193,7 +3294,7 @@
             removeTrackAttrs(el);
             // Bug Fix: Automatically scan and clean dataset attributes during link sanitization
             cleanDataset(el);
-            PROCESSED.set(el, true);
+            PROCESSED.set(el, hrefNow);
             if (didChange) bumpPageCount();
         } finally {
             LOCK.delete(el);
@@ -3231,11 +3332,23 @@
     }
 
     // JIT Speculative dns-prefetch & preconnect on mouse hover to speed up clicks by 300ms
+    // Perf Fix (v2.2.0): the old implementation appended two <link> nodes on EVERY
+    // hover of ANY anchor — unbounded DOM growth in <head> during long sessions, and
+    // repeated (ignored) preconnects. We now warm each origin at most once, skip the
+    // current origin (already connected), and cap the cache. crossOrigin="anonymous"
+    // was also dropped: navigations use credentialed sockets, so anonymous-pool
+    // preconnects were never reused for the actual click.
+    const _warmedOrigins = new Set();
     function warmupTargetServer(url) {
         try {
             const u = new URL(url);
             const origin = u.origin;
-            
+            if (origin === location.origin) return;
+            if (_warmedOrigins.has(origin)) return;
+            if (_warmedOrigins.size >= 64) return;
+            _warmedOrigins.add(origin);
+            if (!document.head) return;
+
             const dns = document.createElement("link");
             dns.rel = "dns-prefetch";
             dns.href = origin;
@@ -3244,31 +3357,51 @@
             const conn = document.createElement("link");
             conn.rel = "preconnect";
             conn.href = origin;
-            conn.crossOrigin = "anonymous";
             document.head.appendChild(conn);
         } catch (e) {}
     }
 
     // Advanced Multi-Hop Redirect Resolver (Server-Side Bypassing via GM HEAD checks)
+    // Bug Fix (v2.2.0): the original implementation was triple-broken —
+    //   1. `maxRedirects: 0` is not a supported GM_xmlhttpRequest option in
+    //      Tampermonkey/Violentmonkey, so redirect chains were silently followed;
+    //   2. `response.headers` does not exist — GM exposes `responseHeaders` as a
+    //      raw STRING, so reading `headers["location"]` always yielded undefined;
+    //   3. there was no guard for GM_xmlhttpRequest being unavailable.
+    // It is now opt-in (serverRedirectResolution), detects the redirect via
+    // response.finalUrl, and parses responseHeaders correctly as a fallback.
     const RESOLVED_MAP = new WeakMap();
+    const REDIRECT_HINT_RE = /(?:[?&](?:url|u|q|dest|target|to|redir)=|\/(?:ck|redirect|go|out|away|l)\b)/i;
     function preResolveServerRedirect(el) {
+        if (!CFG.serverRedirectResolution) return;
+        if (typeof GM_xmlhttpRequest !== "function") return;
         if (!el || !el.href || RESOLVED_MAP.has(el) || el._nt_resolving) return;
+        // Precision gate: only hover-resolve links that still LOOK like redirect
+        // wrappers. Plain destination links were already unwrapped by cleanAnchor;
+        // HEAD-requesting them would leak hover intent to every site on the SERP.
+        if (!REDIRECT_HINT_RE.test(el.href)) return;
         el._nt_resolving = true;
 
         GM_xmlhttpRequest({
             method: "HEAD",
             url: el.href,
             anonymous: true, // Strips cookies to prevent tracking
-            maxRedirects: 0, // Catch 301/302 immediate redirects
             onload: function(response) {
-                if (response.status >= 300 && response.status < 400) {
-                    const redirectTarget = response.headers["location"];
-                    if (redirectTarget && isGoodLink(redirectTarget)) {
+                try {
+                    let target = null;
+                    // Tampermonkey/Violentmonkey follow redirects and expose the final URL.
+                    if (response.finalUrl && response.finalUrl !== el.href && /^https?:/i.test(response.finalUrl)) {
+                        target = response.finalUrl;
+                    } else if (response.status >= 300 && response.status < 400) {
+                        const loc = /(?:^|[\r\n])location:\s*(\S+)/i.exec(String(response.responseHeaders || ""));
+                        if (loc) target = new URL(loc[1], el.href).toString();
+                    }
+                    if (target && isGoodLink(target)) {
                         el.setAttribute("data-nt-orig-href", el.href);
-                        el.href = sanitizeHref(redirectTarget);
+                        el.href = sanitizeHref(target);
                         RESOLVED_MAP.set(el, true);
                     }
-                }
+                } catch (e) {}
                 el._nt_resolving = false;
             },
             onerror: function() {
@@ -3363,10 +3496,18 @@
 
     function processBatchQueue(deadline) {
         const hasDeadline = deadline && typeof deadline.timeRemaining === "function";
-        const remaining = () => hasDeadline ? deadline.timeRemaining() : 8;
+        // Perf Fix (v2.2.0): the setTimeout fallback returned a constant 8ms forever,
+        // so the fallback path ignored its time budget and drained the entire queue
+        // in one tick (main-thread jank on Safari / huge feeds). Track real elapsed
+        // time whenever a native deadline is unavailable.
+        const startedAt = Date.now();
+        const remaining = () => hasDeadline ? deadline.timeRemaining() : Math.max(0, 8 - (Date.now() - startedAt));
         while (remaining() > 1 && linkCleaningQueue.length > 0) {
             const el = linkCleaningQueue.shift();
-            if (el) cleanAnchor(el);
+            if (el) {
+                QUEUED.delete(el);
+                cleanAnchor(el);
+            }
         }
         if (linkCleaningQueue.length > 0) {
             if (typeof requestIdleCallback === "function") {
@@ -3381,7 +3522,10 @@
     }
 
     function scheduleElementCleanup(el) {
-        if (!el) return;
+        // Perf Fix (v2.2.0): QUEUED was declared but never used, so the same element
+        // could pile up dozens of duplicate queue entries per mutation burst.
+        if (!el || QUEUED.has(el)) return;
+        QUEUED.add(el);
         linkCleaningQueue.push(el);
         if (!isCleanupScheduled) {
             isCleanupScheduled = true;
@@ -3435,12 +3579,16 @@
                 els = document.querySelectorAll("meta[http-equiv='refresh' i],meta[http-equiv='Refresh']");
                 for (i = 0; i < els.length; i++) {
                     const meta = els[i];
-                    const parts = /^\s*\d*\s*;\s*url\s*=\s*(.+)$/i.exec(meta.content || "");
-                    if (parts && parts[1]) {
-                        const dest = parts[1].replace(/^['"]|['"]$/g, "").trim();
+                    // Bug Fix (v2.2.0): capture the "delay;url=" prefix and rebuild the
+                    // content attribute. The old code assigned parts[1].replace(...) —
+                    // searching for "url=" *inside the URL itself* — which dropped the
+                    // delay prefix and corrupted valid refresh tags.
+                    const parts = /^\s*(\d*\s*;\s*url\s*=\s*)(.+)$/i.exec(meta.content || "");
+                    if (parts && parts[2]) {
+                        const dest = parts[2].replace(/^['"]|['"]$/g, "").trim();
                         const red = extractRedirect(safeURL(dest));
                         if (red && isGoodLink(red)) {
-                            meta.content = parts[1].replace(/url\s*=\s*.+/i, "url=" + red);
+                            meta.content = parts[1] + red;
                         }
                     }
                 }
@@ -3472,24 +3620,7 @@
                     if (eng && eng.s) {
                         try {
                             const u = new URL(String(url), location.href);
-                            let changed = false;
-                            const params = eng.s;
-                            const allKeys = Array.from(u.searchParams.keys());
-                            allKeys.forEach(k => {
-                                if (k.indexOf("rsv_") === 0) {
-                                    u.searchParams.delete(k);
-                                    changed = true;
-                                    return;
-                                }
-                                for (let i = 0; i < params.length; i++) {
-                                    if (k === params[i]) {
-                                        u.searchParams.delete(k);
-                                        changed = true;
-                                        break;
-                                    }
-                                }
-                            });
-                            if (changed) url = u.toString();
+                            if (stripEngineSearchParams(u, eng)) url = u.toString();
                         } catch (e) {}
                     }
                 }
@@ -3737,7 +3868,8 @@
             [ "blockPrivacySandbox", "Block Google Ad Interest Tracking" ], 
             [ "blockKeepalive", "Block Background Connection Tracking" ], 
             [ "blockIPLoggers", "Block Suspicious Location Trackers" ], 
-            [ "blockBounceRedirect", "Skip Middleman Link Redirects" ] 
+            [ "blockBounceRedirect", "Skip Middleman Link Redirects" ],
+            [ "serverRedirectResolution", "Resolve Server-Side Redirects (sends anonymous hover requests)" ] 
         ]
     }, {
         title: "Browser Cleanup",
@@ -3783,7 +3915,7 @@
         const hdr = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06)");
         const hdrLeft = ntEl("div", null, "display:flex;flex-direction:column");
         hdrLeft.appendChild(ntEl("span", "NullTrail", "font-size:17px;font-weight:700;color:#14b8a6"));
-        hdrLeft.appendChild(ntEl("span", "v2.1.0", "font-size:11px;color:#6b7280;margin-top:2px"));
+        hdrLeft.appendChild(ntEl("span", "v2.2.0", "font-size:11px;color:#6b7280;margin-top:2px"));
         hdr.appendChild(hdrLeft);
         const closeBtn = ntEl("button", "x", "background:none;border:none;color:#9ca3af;font-size:22px;cursor:pointer;padding:0 4px;line-height:1");
         closeBtn.title = "Close";
@@ -3836,8 +3968,7 @@
                 SV(key, cb.checked);
                 pushConfigToPage();
                 if (key === "referralMarketing") {
-                    _lruKeys.length = 0;
-                    for (const k in _lruMap) delete _lruMap[k];
+                    lruClear();
                 }
                 if (key === "purgeGACookies" && cb.checked) purgeGACookies();
                 if (key === "purgeStorage" && cb.checked) purgeTrackerStorage();
@@ -3918,7 +4049,9 @@
             cb2.addEventListener("change", function() {
                 if (cb2.checked) unblockTextSelectionSites[host] = true;
                 else delete unblockTextSelectionSites[host];
-                SV("unblockTextSelectionSites", "activeAdObfuscation", unblockTextSelectionSites);
+                // Bug Fix (v2.2.0): previously persisted the string "activeAdObfuscation"
+                // instead of the site map (same bad copy-paste as the GV default).
+                SV("unblockTextSelectionSites", unblockTextSelectionSites);
                 pushConfigToPage();
             });
             row2.appendChild(cb2);
@@ -3927,6 +4060,9 @@
 
         // Stats renderer
         function renderStats() {
+            // Bug Fix (v2.2.0): clear before re-render — the reset button below used
+            // to append a duplicate set of rows on top of the stale ones.
+            while (content.firstChild) content.removeChild(content.firstChild);
             const eng = getEngine(location.hostname);
             const rows = [ 
                 [ "Links Sanitized", STATS.cleaned ], 
@@ -3955,6 +4091,9 @@
         }
 
         function renderRules() {
+            // Bug Fix (v2.2.0): clear before re-render — the update button below used
+            // to append duplicate rows and a duplicate button after each refresh.
+            while (content.firstChild) content.removeChild(content.firstChild);
             const lastUpd = GV("rulesUpdated", 0) | 0;
             const lastHash = GV("rulesHash", "");
             const dateStr = lastUpd ? new Date(lastUpd).toLocaleString() : "never";
@@ -3990,7 +4129,7 @@
         }
 
         function renderAbout() {
-            content.appendChild(ntEl("div", "NullTrail v2.1.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "NullTrail v2.2.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
             content.appendChild(ntEl("div", "An autonomous, zero-jargon browser privacy engine fusing advanced hyperlink scrubbing, tracking parameter deletion, fast-forward redirect unwrapping, and strict analytical API shielding.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:14px"));
             const features = [ 
                 "40+ Search Engine Redirect unwrapping & sanitization", 
@@ -4011,7 +4150,7 @@
             const resetBtn = ntEl("button", "Reset all settings to default", "margin-top:16px;padding:8px 16px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#ef4444;font-size:12px;cursor:pointer");
             resetBtn.addEventListener("click", function() {
                 if (confirm("Are you sure you want to reset all NullTrail settings, whitelist sites, and cached rule databases?")) {
-                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation" ].forEach(DV);
+                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "statCleaned", "statFields", "statBlocked", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation", "serverRedirectResolution" ].forEach(DV);
                     alert("Settings successfully reset. Please reload the webpage.");
                     container.remove();
                 }
@@ -4072,6 +4211,12 @@
     // CSP-Proof execution call directly inside the Content Script context
     const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
     ntMainWorldBoot(win);
+
+    // Privacy Fix (v2.2.0): enforce the referrer meta immediately at document-start.
+    // Previously it only ran at DOMContentLoaded — after early subresource requests
+    // (stylesheets, preloads, beacons) had already gone out with the site's default
+    // referrer. The DOMContentLoaded re-run below remains as an idempotent catch-up.
+    enforceMetaReferrer();
 
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", function() {
@@ -4150,5 +4295,5 @@
     setTimeout(function() { updateRules(false); }, 3000);
     setInterval(function() { updateRules(false); }, 6 * 3600 * 1000);
 
-    log("NullTrail v2.1.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
+    log("NullTrail v2.2.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
 })();

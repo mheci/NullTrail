@@ -1,7 +1,7 @@
 # NullTrail — Universal Tracking & Redirect Scrubber
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.1.0-teal.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.2.0-teal.svg)]()
 [![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)]()
 
 **NullTrail** is an autonomous, high-performance browser privacy engine designed to make your web surfing clean, fast, and secure. 
@@ -29,6 +29,9 @@ Websites often block standard right-clicks (context menus) or disable text copyi
 * **Enable Context Menus:** Safely restores browser right-clicks without breaking website buttons.
 * **Enable Text Copying:** Dynamically removes selection restrictions only on the text path you interact with, keeping the rest of the site UI and style fully intact.
 * *Note: These features are disabled by default and only turn on where you explicitly request them.*
+
+### 🌐 Optional Server-Side Redirect Resolution (Opt-In)
+For links that hide their destination behind a pure server-side redirect (no URL parameter to unwrap), NullTrail can resolve them on hover using anonymous, cookie-less background requests. Because this contacts the redirect server, it is **disabled by default** and can be enabled from the dashboard ("Resolve Server-Side Redirects").
 
 ---
 
