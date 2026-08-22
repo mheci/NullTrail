@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NullTrail — Universal Tracking & Redirect Scrubber
 // @namespace    https://github.com/nulltrail
-// @version      3.0.0
+// @version      3.0.1
 // @description  Fix the web.
 // @license      Unlicense
 // @supportURL   https://github.com/mheci/NullTrail/issues
@@ -16,6 +16,7 @@
 // @grant        unsafeWindow
 // @connect      rules1.clearurls.xyz
 // @connect      rules2.clearurls.xyz
+// @connect      gitlab.com
 // @noframes
 // @match        *://*.bing.com/*
 // @match        *://bing.com/*
@@ -1437,7 +1438,7 @@
     // product variant on /dp/ links: dropping them silently changes which
     // variant loads. That's a broken website, not a tracker. The override is
     // applied at compile time so it survives every future feed update, and the
-    // precision-budget CI corpus (tests/precision-corpus.js) guards it.
+    // boot-time canary fixtures (rulesCanary) guard it.
     const PRECISION_RULE_OVERRIDES = {
         amazon: { rules: [ "th", "psc" ], referralMarketing: [] }
     };
@@ -4966,16 +4967,23 @@
     function saneHostMap(v) {
         if (!v || typeof v !== "object" || Array.isArray(v)) return null;
         const out = {};
-        Object.keys(v).forEach(h => {
+        Object.keys(v).forEach(raw => {
+            // Bug Fix (v3.0.1): lowercase imported host keys — every lookup path
+            // (eff(), dashboard rows) compares against location.hostname.toLowerCase(),
+            // so a backup containing "WWW.Example.com" previously produced an
+            // override that could never match. Values are read from the RAW
+            // key and written under the normalized one.
+            const h = String(raw).trim().toLowerCase();
+            const val = v[raw];
             if (!HOST_KEY_RE.test(h)) return;
-            if (typeof v[h] === "boolean") out[h] = v[h];
-            else if (v[h] && typeof v[h] === "object" && !Array.isArray(v[h])) {
+            if (typeof val === "boolean") out[h] = val;
+            else if (val && typeof val === "object" && !Array.isArray(val)) {
                 const inner = {};
-                Object.keys(v[h]).forEach(k2 => {
-                    if (typeof v[h][k2] === "boolean" && typeof CFG[k2] === "boolean") inner[k2] = v[h][k2];
+                Object.keys(val).forEach(k2 => {
+                    if (typeof val[k2] === "boolean" && typeof CFG[k2] === "boolean") inner[k2] = val[k2];
                 });
                 if (Object.keys(inner).length) out[h] = inner;
-            } else if (v[h]) {
+            } else if (val) {
                 out[h] = true;
             }
         });
@@ -5193,7 +5201,7 @@
         const hdr = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06)");
         const hdrLeft = ntEl("div", null, "display:flex;flex-direction:column");
         hdrLeft.appendChild(ntEl("span", "NullTrail", "font-size:17px;font-weight:700;color:#14b8a6"));
-        hdrLeft.appendChild(ntEl("span", "v3.0.0", "font-size:11px;color:#6b7280;margin-top:2px"));
+        hdrLeft.appendChild(ntEl("span", "v3.0.1", "font-size:11px;color:#6b7280;margin-top:2px"));
         hdr.appendChild(hdrLeft);
         const closeBtn = ntEl("button", "×", "background:none;border:none;color:#9ca3af;font-size:24px;cursor:pointer;padding:0 4px;line-height:1");
         closeBtn.title = "Close (Esc)";
@@ -5748,7 +5756,7 @@
         }
 
         function renderAbout() {
-            content.appendChild(ntEl("div", "NullTrail v3.0.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "NullTrail v3.0.1", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
             content.appendChild(ntEl("div", "An autonomous, zero-jargon browser privacy engine fusing advanced hyperlink scrubbing, tracking parameter deletion, fast-forward redirect unwrapping, and strict analytical API shielding.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:14px"));
             const features = [ 
                 "40+ Search Engine Redirect unwrapping & sanitization", 
@@ -6062,5 +6070,5 @@
     setTimeout(function() { updateRules(false); }, 3000);
     setInterval(function() { updateRules(false); }, 6 * 3600 * 1000);
 
-    log("NullTrail v3.0.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
+    log("NullTrail v3.0.1 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
 })();
