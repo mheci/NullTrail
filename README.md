@@ -1,7 +1,7 @@
 # NullTrail — Universal Tracking & Redirect Scrubber
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.0.1-teal.svg)](https://github.com/mheci/NullTrail)
+[![Version](https://img.shields.io/badge/Version-3.0.2-teal.svg)](https://github.com/mheci/NullTrail)
 [![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)](https://raw.githubusercontent.com/mheci/NullTrail/main/NullTrail.user.js)
 
 **NullTrail** is an autonomous, high-performance browser privacy engine designed to make your web surfing clean, fast, and secure. 
@@ -78,6 +78,7 @@ Take control of your privacy with simple keyboard shortcuts anywhere on the web:
 ## 🔄 Updates You Can Trust
 
 * **The userscript itself** updates automatically through your manager (Tampermonkey/Violentmonkey) straight from this repository — zero action needed.
+* Releases are automated on tag push: each `v*` tag is syntax-validated against its declared version by CI and published with its userscript asset, so [`releases/latest/download`](https://github.com/mheci/NullTrail/releases/latest/download/NullTrail.user.js) always serves the newest stable build.
 * **The rule database** self-updates about every 6 days, only downloads when the upstream hash actually changed, and is SHA-256-verified and schema-validated before it can touch your browser. The dashboard's **Rules** tab reports the outcome of every check honestly (installed / already current / failed with auto-retry) — no false "Updated successfully" messages, ever.
 
 ---
