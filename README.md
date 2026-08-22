@@ -1,12 +1,21 @@
 # NullTrail — Universal Tracking & Redirect Scrubber
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.0.2-teal.svg)](https://github.com/mheci/NullTrail)
+[![Version](https://img.shields.io/badge/Version-3.1.0-teal.svg)](https://github.com/mheci/NullTrail)
 [![Type](https://img.shields.io/badge/Type-Userscript-orange.svg)](https://raw.githubusercontent.com/mheci/NullTrail/main/NullTrail.user.js)
 
 **NullTrail** is an autonomous, high-performance browser privacy engine designed to make your web surfing clean, fast, and secure. 
 
 It runs silently in the background, sanitizing hyperlinks, bypassing intermediate redirection pages, blocking analytical trackers, and auto-declining cookie consent banners—without slowing down your computer or breaking website layouts.
+
+---
+
+## 🆕 What's New in 3.1
+
+* **📋 Per-page strip summary** — the userscript menu now answers "what did NullTrail actually clean here?" with a transient on-page report: every removed parameter, unwrapped redirect hop and path rule, each attributed to the exact cleaner that matched. Memory-only, never persisted.
+* **⏱️ 15-minute pause** — quick menu control that pauses protection with a guaranteed auto-resume (never "off forever").
+* **🩺 Feed health monitor** — the Rules tab now shows last outcome, latency and age for every rule/hash feed, with plain-language warnings when quorum is lost or mirrors fail, so silent feed outages are visible at a glance.
+* **🎭 Honest personas** — Gentle is now genuinely gentler than Balanced (link cleaning only; all network-, cookie- and page-altering shields off), fixing the two-presets-one-behavior debt.
 
 ---
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NullTrail — Universal Tracking & Redirect Scrubber
 // @namespace    https://github.com/nulltrail
-// @version      3.0.2
+// @version      3.1.0
 // @description  Fix the web.
 // @license      Unlicense
 // @supportURL   https://github.com/mheci/NullTrail/issues
@@ -1048,7 +1048,6 @@
         globalStatus: GV("globalStatus", true),
         referralMarketing: GV("referralMarketing", true),
         forceRedirection: GV("forceRedirection", true),
-        domainBlocking: GV("domainBlocking", false),
         localHostsSkipping: GV("localHostsSkipping", true),
         forceNoReferrer: GV("forceNoReferrer", true),
         relNoReferrer: GV("relNoReferrer", true),
@@ -1284,6 +1283,7 @@
             if (!ev || !ev.persisted) return;
             try {
                 pushConfigToPage();
+                resetPageStrip(); // v3.1.0 (#31): bfcache views start a fresh summary
                 window.dispatchEvent(new CustomEvent("nt:bfcache"));
                 stripSERPBar();
                 scanDom();
@@ -1311,6 +1311,43 @@
             });
             while (_activity.length > ACTIVITY_MAX) _activity.shift();
         } catch (e) {}
+    }
+
+    // v3.1.0 (#31) — per-page strip summary: WHAT was removed on THIS page and
+    // WHICH rule matched it, deduplicated per (label, rule) pair with a hit
+    // counter, capped, and held in MEMORY ONLY under the same privacy contract
+    // as the activity buffer (statistics off = nothing recorded anywhere).
+    // Reset on every SPA/history navigation, mirroring the intentional
+    // _clickedConsents WeakSet reset semantics.
+    const STRIP_SUMMARY_MAX = 40;
+    let _pageStrip = Object.create(null); // key -> { label, rule, n }
+    function recordStrip(label, rule) {
+        if (!CFG.statistics || !label) return;
+        try {
+            const k = (rule || "") + "|" + label;
+            const e = _pageStrip[k];
+            if (e) {
+                e.n++;
+                return;
+            }
+            if (Object.keys(_pageStrip).length >= STRIP_SUMMARY_MAX) return;
+            _pageStrip[k] = { label: String(label), rule: String(rule || ""), n: 1 };
+        } catch (e) {}
+    }
+    function resetPageStrip() {
+        _pageStrip = Object.create(null);
+    }
+    // Pure formatter (unit-harnessed): sorted for stable output, longest-rule
+    // attribution first so "?utm_source — globalRules" reads naturally.
+    function formatStripSummary(strip) {
+        const out = [];
+        try {
+            Object.keys(strip || {}).sort().forEach(k => {
+                const e = strip[k];
+                out.push(e.label + (e.n > 1 ? " ×" + e.n : "") + (e.rule ? " — " + e.rule : ""));
+            });
+        } catch (e) {}
+        return out;
     }
 
     // v3.0.0 (#24) — daily stats buckets, local-only, auto-pruned past 90 days.
@@ -1654,7 +1691,20 @@
     // agreeing hashes before trusting an update. Three ~100-byte files, only at
     // update time — never speculative.
     function hashQuorum() {
-        return Promise.all(HASH_URLS.map(u => gmFetch(u).then(r => (r.status === 200 ? (r.text || "").trim().toLowerCase() : null)).catch(() => null))).then(vals => {
+        // v3.1.0 (#32): each hash feed attempt feeds the health monitor.
+        return Promise.all(HASH_URLS.map(u => {
+            const t0 = Date.now();
+            return gmFetch(u)
+                .then(r => {
+                    const v = r.status === 200 ? (r.text || "").trim().toLowerCase() : null;
+                    recordFeed(u, !!v, Date.now() - t0);
+                    return v;
+                })
+                .catch(() => {
+                    recordFeed(u, false, Date.now() - t0);
+                    return null;
+                });
+        })).then(vals => {
             const got = vals.filter(v => v && v.length >= 32);
             if (got.length < 2) return null;
             const counts = {};
@@ -1795,12 +1845,6 @@
         };
     }
 
-    function activeRuleRes(p) {
-        // Perf (v2.5.0): memoize the concatenated list — it was reallocated on
-        // every cleaned URL whenever referral stripping was enabled by the user.
-        return CFG.referralMarketing ? p.ruleRes : (p._allRes || (p._allRes = p.ruleRes.concat(p.referralRes)));
-    }
-
     // v3.0.0 (#1) — confidence-tiered classification. Unknown params are NEVER
     // stripped by us; they are merely counted (and, if high-entropy, offered to
     // the user as personal-rule candidates — human-in-the-loop only).
@@ -1860,12 +1904,18 @@
         // param isn't double-counted across overlapping providers.
         const classifyHere = CFG.statistics && p.urlPattern && p.urlPattern.source === ".*";
         let removed = 0;
-        const fkeys = Array.from(new Set(Array.from(fields.keys())));
+        // Perf (v3.1.0): snapshot the keys once — no Set pre-dedupe, no second
+        // array. URLSearchParams.delete() removes EVERY duplicate of a name in
+        // one call, so later duplicates are skipped via the has() guard instead
+        // of being re-tested against the fused matchers.
+        const fkeys = Array.from(fields.keys());
         for (let k = 0; k < fkeys.length; k++) {
             const key = fkeys[k];
+            if (!fields.has(key)) continue;
             if (rulesMatch(p, key)) {
                 fields.delete(key);
                 removed++;
+                recordStrip("?" + key, p.name);
             } else if (classifyHere) {
                 classifyParam(key, fields.get(key));
             }
@@ -1875,6 +1925,7 @@
             if (rulesMatch(p, hkeys[h])) {
                 fragments.delete(hkeys[h]);
                 removed++;
+                recordStrip("#" + hkeys[h], p.name);
             }
         }
         if (removed === 0) return url;
@@ -1918,17 +1969,14 @@
                     if (CFG.forceRedirection || opts.followRedirects !== false) return target;
                 }
             }
-            if (p.completeProvider) {
-                if (CFG.domainBlocking && opts.noFollow) {
-                    bumpStats(0, 1);
-                    continue;
-                }
-            }
             if (p.rawRules.length) {
                 for (let r = 0; r < p.rawRules.length; r++) {
                     const b = url;
                     url = url.replace(p.rawRules[r], "");
-                    if (b !== url) bumpStats(1, 0);
+                    if (b !== url) {
+                        bumpStats(1, 0);
+                        recordStrip("(path) " + (p.rawRules[r].source || "pattern"), p.name);
+                    }
                 }
             }
             url = removeFields(p, url);
@@ -1949,6 +1997,83 @@
     ];
 
     const UPDATE_INTERVAL = 6 * 24 * 3600 * 1000;
+
+    // v3.1.0 (#32) — feed health monitor. Every RULE/HASH fetch outcome is
+    // recorded per-URL (ok, timestamp, latency); the Rules tab renders it and
+    // derives actionable warnings purely from these facts — no new trust
+    // assumptions, no extra network, storage stays a few hundred bytes.
+    let _feedHealth = null;
+    function loadFeedHealth() {
+        if (_feedHealth) return _feedHealth;
+        let h = null;
+        try { h = GV("feedHealth", null); } catch (e) {}
+        if (!h || typeof h !== "object" || Array.isArray(h)) h = {};
+        // Sane re-shape: only well-formed entries survive a tampered cache.
+        const out = {};
+        Object.keys(h).forEach(u => {
+            const e = h[u];
+            if (typeof u === "string" && u && e && typeof e === "object" &&
+                typeof e.ok === "boolean" && typeof e.at === "number" && typeof e.ms === "number") {
+                out[u] = { ok: e.ok, at: e.at, ms: e.ms };
+            }
+        });
+        _feedHealth = out;
+        return out;
+    }
+    function recordFeed(url, okd, elapsedMs) {
+        try {
+            const h = loadFeedHealth();
+            h[url] = { ok: !!okd, at: Date.now(), ms: Math.max(0, Math.round(elapsedMs | 0)) };
+            SV("feedHealth", h);
+        } catch (e) {}
+    }
+    // Pure (harnessed): dashboard rows from the raw health map.
+    function summarizeFeedHealth(health, now) {
+        now = now || Date.now();
+        const rows = [];
+        Object.keys(health || {}).forEach(u => {
+            const e = health[u];
+            let host = u;
+            try { host = new URL(u).hostname; } catch (err) {}
+            rows.push({
+                host: host,
+                kind: /\.hash$/i.test(u) ? "hash" : "rules",
+                ok: !!e.ok,
+                ms: e.ms | 0,
+                ageMs: Math.max(0, now - (e.at || 0)),
+                url: u
+            });
+        });
+        return rows;
+    }
+    function ageLabel(ms) {
+        if (!(ms >= 0)) return "never";
+        if (ms < 60000) return "just now";
+        if (ms < 3600000) return Math.floor(ms / 60000) + "m ago";
+        if (ms < 86400000) return Math.floor(ms / 3600000) + "h ago";
+        return Math.floor(ms / 86400000) + "d ago";
+    }
+    // Pure (harnessed): actionable verdict over recorded outcomes.
+    // Entries written by one quorum run share timestamps within ~60s, so the
+    // hash subset approximates the last run without extra storage keys.
+    function feedHealthVerdict(rows, autoUpdateRules) {
+        const hashes = (rows || []).filter(r => r.kind === "hash");
+        const datas = (rows || []).filter(r => r.kind === "rules");
+        const hashOkN = hashes.filter(r => r.ok).length;
+        if (hashes.length > 0 && hashOkN === 0) {
+            return { level: "bad", text: "No rule-hash feed was reachable at the last check — updates stay paused for safety. Your cleaning rules keep working from the cached database." };
+        }
+        if (hashes.length > 0 && hashOkN < 2) {
+            return { level: "warn", text: "Only one hash feed answered last time — the 2-of-3 safety quorum needs two agreeing feeds before any update is trusted." };
+        }
+        if (datas.length > 0 && datas.every(r => !r.ok)) {
+            return { level: "warn", text: "Every rule download mirror failed at the last check. Cached cleaning rules remain active." };
+        }
+        if (!autoUpdateRules) {
+            return { level: "warn", text: "Automatic updates are off — use “Check for updates now” below to refresh rules manually." };
+        }
+        return { level: "ok", text: "" };
+    }
 
     function gmFetch(url) {
         return new Promise(function(resolve, reject) {
@@ -1983,12 +2108,19 @@
         });
     }
 
-    function firstOK(urls) {
+    function firstOK(urls, onAttempt) {
         return urls.reduce((p, u) => {
             return p.catch(() => {
+                const t0 = Date.now();
                 return gmFetch(u).then(r => {
-                    if (r.status === 200 && r.text) return r;
+                    const okd = r.status === 200 && r.text;
+                    // v3.1.0 (#32): optional per-attempt outcome recorder.
+                    if (onAttempt) { try { onAttempt(u, !!okd, Date.now() - t0); } catch (e) {} }
+                    if (okd) return r;
                     throw new Error("status");
+                }, e => {
+                    if (onAttempt) { try { onAttempt(u, false, Date.now() - t0); } catch (e2) {} }
+                    throw e;
                 });
             });
         }, Promise.reject(new Error("init")));
@@ -2064,7 +2196,9 @@
             // Already staged with this exact hash? Nothing new to do.
             const pending = GV("rulesPending", null);
             if (pending && pending.hash === remoteHash) return "staged";
-            return firstOK(RULE_URLS).then(dr => {
+            return firstOK(RULE_URLS, function(u, okd, ms) {
+                recordFeed(u, okd, ms); // v3.1.0 (#32)
+            }).then(dr => {
                 const dataText = (dr.text || "").trim();
                 const accept = digest => {
                     if (digest && digest !== remoteHash) {
@@ -2629,6 +2763,7 @@
                 if (STRIP_PARAMS_RE.test(k) || /utm_/i.test(k)) {
                     u.searchParams.delete(k);
                     changed = true;
+                    recordStrip("?" + k, "serp quick-pass"); // v3.1.0 (#31)
                 }
             });
             // v3.0.0 (#8): the quick pass previously ignored hash-fragment
@@ -2641,6 +2776,7 @@
                     if (STRIP_PARAMS_RE.test(hkeys[i]) || /utm_/i.test(hkeys[i])) {
                         fr.delete(hkeys[i]);
                         hChanged = true;
+                        recordStrip("#" + hkeys[i], "serp quick-pass"); // v3.1.0 (#31)
                     }
                 }
                 if (hChanged) {
@@ -2660,7 +2796,11 @@
         let s = String(href);
         if (!/^https?:\/\//i.test(s) && s.indexOf("intent:") !== 0 && s.charAt(0) !== "/") return s;
         const d = extractRedirect(safeURL(s));
-        if (d && isGoodLink(d)) s = d;
+        if (d && isGoodLink(d)) {
+            // v3.1.0 (#31): surface unwrapped hops in the page strip summary.
+            try { recordStrip("redirect → " + new URL(d, location.href).hostname, "unwrap"); } catch (e) {}
+            s = d;
+        }
         if (s.indexOf("intent:") === 0) {
             const iv = resolveIntent(s);
             if (iv) s = iv;
@@ -4421,6 +4561,24 @@
         if (linkCleaningQueue.length > 0) ensureCleanupScheduled();
     }
 
+    // Perf (v3.1.0): one mutation burst used to call drainIOPending() once PER
+    // registered element — each call re-iterating up to 96 pending entries and
+    // issuing unobserve() for work a single pass would cover. Coalescing the
+    // drain into a microtask keeps identical semantics (pending links still
+    // reach the idle queue before any idle callback can run) at 1/Nth of the
+    // redundant iteration on SERP-sized insertions.
+    let _ioDrainQueued = false;
+    function queueIODrain() {
+        if (_ioDrainQueued) return;
+        _ioDrainQueued = true;
+        const run = function() {
+            _ioDrainQueued = false;
+            drainIOPending();
+        };
+        if (typeof queueMicrotask === "function") queueMicrotask(run);
+        else setTimeout(run, 0);
+    }
+
     function processBatchQueue(deadline) {
         const hasDeadline = deadline && typeof deadline.timeRemaining === "function";
         // Perf Fix (v2.2.0): the setTimeout fallback returned a constant 8ms forever,
@@ -4481,7 +4639,7 @@
             // to the front, drainIOPending guarantees background completion.
             _pendingIO.add(el);
             try { _io.observe(el); } catch (e) {}
-            drainIOPending();
+            queueIODrain();
             return;
         }
         linkCleaningQueue.push(el);
@@ -4688,6 +4846,7 @@
                 }
                 const r = orig.call(history, state, title, url);
                 _clickedConsents = new WeakSet(); // Reset clicked consents on navigation!
+                resetPageStrip(); // v3.1.0 (#31): fresh strip summary per SPA view
                 setTimeout(function() {
                     autoRejectConsent();
                     scheduleNavScan();
@@ -4700,7 +4859,10 @@
             history.replaceState = wrapNav(_replace);
         } catch (e) {}
 
-        window.addEventListener("popstate", () => setTimeout(scheduleNavScan, 0), { passive: true });
+        window.addEventListener("popstate", () => setTimeout(function() {
+            resetPageStrip(); // v3.1.0 (#31)
+            scheduleNavScan();
+        }, 0), { passive: true });
         if (typeof navigation !== "undefined" && navigation.addEventListener) {
             navigation.addEventListener("navigatesuccess", () => setTimeout(scheduleNavScan, 0));
         }
@@ -4900,14 +5062,27 @@
     }, true);
 
     // v3.0.0 (#22) — personas: preset mappings over existing toggles only.
+    // v3.1.0 fix: Gentle and Balanced were byte-identical presets (wave-1
+    // debt). Gentle now means "clean URLs, touch nothing else" — every
+    // network-, cookie- or page-altering shield is off — while Balanced keeps
+    // the shipped defaults. IP-logger blocking stays on in Gentle because it
+    // only hard-blocks known malicious endpoints and never breaks a site.
     const PERSONA_PRESETS = {
         gentle: {
             serverRedirectResolution: false, activeAdObfuscation: false, deepFrames: false,
-            respawnStrict: false, stagedRules: true, globalStatus: true
+            respawnStrict: false, stagedRules: true, globalStatus: true,
+            blockGA: false, blockPrivacySandbox: false, blockKeepalive: false,
+            blockBounceRedirect: false, enforcePrivacyPresets: false,
+            purgeGACookies: false, purgeStorage: false,
+            forceNoReferrer: false, relNoReferrer: false, noping: false
         },
         balanced: {
             serverRedirectResolution: false, activeAdObfuscation: false, deepFrames: false,
-            respawnStrict: false, stagedRules: true, globalStatus: true
+            respawnStrict: false, stagedRules: true, globalStatus: true,
+            blockGA: true, blockPrivacySandbox: true, blockKeepalive: true,
+            blockBounceRedirect: true, enforcePrivacyPresets: true,
+            purgeGACookies: true, purgeStorage: true,
+            forceNoReferrer: true, relNoReferrer: true, noping: true
         },
         paranoid: {
             serverRedirectResolution: true, deepFrames: true, respawnStrict: true,
@@ -5201,7 +5376,7 @@
         const hdr = ntEl("div", null, "display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06)");
         const hdrLeft = ntEl("div", null, "display:flex;flex-direction:column");
         hdrLeft.appendChild(ntEl("span", "NullTrail", "font-size:17px;font-weight:700;color:#14b8a6"));
-        hdrLeft.appendChild(ntEl("span", "v3.0.2", "font-size:11px;color:#6b7280;margin-top:2px"));
+        hdrLeft.appendChild(ntEl("span", "v3.1.0", "font-size:11px;color:#6b7280;margin-top:2px"));
         hdr.appendChild(hdrLeft);
         const closeBtn = ntEl("button", "×", "background:none;border:none;color:#9ca3af;font-size:24px;cursor:pointer;padding:0 4px;line-height:1");
         closeBtn.title = "Close (Esc)";
@@ -5667,6 +5842,25 @@
                 content.appendChild(row);
             }
 
+            // v3.1.0 (#32) — feed health monitor: per-feed last outcome with
+            // age + latency, plus an actionable verdict banner.
+            const fhRows = summarizeFeedHealth(loadFeedHealth(), Date.now());
+            if (fhRows.length) {
+                content.appendChild(ntEl("div", "Feed Health", "font-size:11px;font-weight:700;text-transform:uppercase;color:#6b7280;margin:14px 0 6px"));
+                fhRows.sort(function(a, b) { return a.kind === b.kind ? a.host.localeCompare(b.host) : (a.kind < b.kind ? -1 : 1); }).forEach(function(r) {
+                    const row = ntEl("div", null, "display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.04)");
+                    row.appendChild(ntEl("span", r.host, "font-size:12px;font-family:monospace;color:#dfe4ee;word-break:break-all"));
+                    row.appendChild(ntEl("span", (r.ok ? "OK" : "FAILED") + " · " + r.ms + "ms · " + ageLabel(r.ageMs) + " · " + (r.kind === "hash" ? "hash feed" : "rule feed"),
+                        "font-size:11px;font-weight:600;flex-shrink:0;color:" + (r.ok ? "#14b8a6" : "#ef4444")));
+                    content.appendChild(row);
+                });
+                const verd = feedHealthVerdict(fhRows, CFG.autoUpdateRules);
+                if (verd.level !== "ok") {
+                    content.appendChild(ntEl("div", verd.text,
+                        "font-size:12px;line-height:1.5;border-radius:8px;padding:8px 10px;margin:10px 0;background:" + (verd.level === "bad" ? "rgba(239,68,68,.08)" : "rgba(245,158,11,.08)") + ";border:1px solid " + (verd.level === "bad" ? "rgba(239,68,68,.3)" : "rgba(245,158,11,.3)") + ";color:" + (verd.level === "bad" ? "#ef4444" : "#f59e0b")));
+                }
+            }
+
             // v3.0.0 (#3) — canary failure banner: rules self-healed, user is told.
             const canaryInfo = GV("rulesCanaryFail", null);
             if (canaryInfo) {
@@ -5756,7 +5950,7 @@
         }
 
         function renderAbout() {
-            content.appendChild(ntEl("div", "NullTrail v3.0.2", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
+            content.appendChild(ntEl("div", "NullTrail v3.1.0", "font-size:15px;font-weight:700;color:#14b8a6;margin-bottom:8px"));
             content.appendChild(ntEl("div", "An autonomous, zero-jargon browser privacy engine fusing advanced hyperlink scrubbing, tracking parameter deletion, fast-forward redirect unwrapping, and strict analytical API shielding.", "font-size:12px;color:#9ca3af;line-height:1.5;margin-bottom:14px"));
             const features = [ 
                 "40+ Search Engine Redirect unwrapping & sanitization", 
@@ -5783,8 +5977,8 @@
             content.appendChild(ntEl("div", "Protection Personas", "font-size:11px;font-weight:700;text-transform:uppercase;color:#6b7280;margin:14px 0 6px"));
             content.appendChild(ntEl("div", "Personas only flip switches you can also set individually — nothing hidden.", "font-size:11px;color:#6b7280;line-height:1.5;margin-bottom:6px"));
             const pRow = ntEl("div", null, "display:flex;gap:6px;margin-bottom:10px");
-            [ [ "Gentle", "Maximum website compatibility — every risky feature off." ],
-              [ "Balanced", "The recommended default mix (as shipped)." ],
+            [ [ "Gentle", "Link cleaning only — every network-, cookie- or page-altering shield stays off. Maximum compatibility for strict sites and managed devices." ],
+              [ "Balanced", "The recommended default mix: cleaning plus standard tracker shielding." ],
               [ "Paranoid", "Everything on, including strict respawn blocking and frame cleaning. Ad-noise stays off unless you opt in." ] ].forEach(function(p) {
                 const b = ntEl("button", p[0], "flex:1;padding:8px 4px;border:1px solid rgba(255,255,255,.14);border-radius:6px;background:transparent;color:#dfe4ee;font-size:12px;font-weight:600;cursor:pointer");
                 b.title = p[1];
@@ -5849,7 +6043,7 @@
                     agreed = window.confirm("Are you sure you want to reset all NullTrail settings, whitelist sites, and cached rule databases?");
                 } catch (e) {}
                 if (agreed) {
-                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "rulesLastCheck", "rulesLastResult", "statCleaned", "statFields", "statBlocked", "statDaily", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation", "serverRedirectResolution", "respectMetered", "rulesNextTry", "deepFrames", "stagedRules", "respawnStrict", "userStripRules", "siteProfiles", "dryRunSites", "pauseUntil", "ampCanonicalSites", "rulesDataPrev", "rulesPending", "rulesDiff", "rulesCanaryFail" ].forEach(DV);
+                    [ "globalStatus", "referralMarketing", "forceRedirection", "forceNoReferrer", "relNoReferrer", "noping", "stripSERPParams", "blockGA", "blockPrivacySandbox", "blockKeepalive", "blockBounceRedirect", "blockIPLoggers", "enforcePrivacyPresets", "purgeGACookies", "purgeStorage", "showHUD", "autoUpdateRules", "whitelist", "rulesData", "rulesHash", "rulesUpdated", "rulesLastCheck", "rulesLastResult", "statCleaned", "statFields", "statBlocked", "statDaily", "unblockContextMenuSites", "unblockTextSelectionSites", "activeAdObfuscation", "serverRedirectResolution", "respectMetered", "rulesNextTry", "deepFrames", "stagedRules", "respawnStrict", "userStripRules", "siteProfiles", "dryRunSites", "pauseUntil", "ampCanonicalSites", "rulesDataPrev", "rulesPending", "rulesDiff", "rulesCanaryFail", "feedHealth" ].forEach(DV);
                     try { window.alert("Settings successfully reset. Please reload the webpage."); } catch (e) {}
                     closeDash();
                 }
@@ -5944,6 +6138,63 @@
         }
     }, true);
 
+    // v3.1.0 (#31) — on-demand page summary: a transient, click-to-dismiss
+    // overlay listing what NullTrail removed here and which rule matched.
+    // Same visual language and privacy contract as the HUD: local, ephemeral,
+    // never logged anywhere.
+    let _stripToastEl = null;
+    let _stripToastTimer = null;
+    function hideStripToast() {
+        if (_stripToastTimer) {
+            clearTimeout(_stripToastTimer);
+            _stripToastTimer = null;
+        }
+        if (_stripToastEl) {
+            try { _stripToastEl.remove(); } catch (e) {}
+            _stripToastEl = null;
+        }
+    }
+    function showStripSummaryToast() {
+        try {
+            hideStripToast();
+            const lines = formatStripSummary(_pageStrip);
+            const host = location.hostname;
+            const box = document.createElement("div");
+            box.id = "nt-strip-toast";
+            box.style.cssText = "position:fixed;bottom:12px;left:12px;z-index:2147483647;background:rgba(17,23,32,.96);color:#dfe4ee;font:500 12px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.1);box-shadow:0 8px 30px rgba(0,0,0,.45);max-width:340px;cursor:pointer;backdrop-filter:blur(4px)";
+            const head = document.createElement("div");
+            head.textContent = "NullTrail — this page";
+            head.style.cssText = "font-weight:700;color:#14b8a6;margin-bottom:4px";
+            box.appendChild(head);
+            if (!lines.length) {
+                const empty = document.createElement("div");
+                empty.textContent = "Nothing to report yet — links seen so far were already clean.";
+                empty.style.color = "#9ca3af";
+                box.appendChild(empty);
+            } else {
+                const list = document.createElement("div");
+                list.style.color = "#dfe4ee";
+                lines.slice(0, 12).forEach(function(ln) {
+                    const row = document.createElement("div");
+                    row.textContent = "• " + ln;
+                    row.style.wordBreak = "break-all";
+                    list.appendChild(row);
+                });
+                if (lines.length > 12) {
+                    const more = document.createElement("div");
+                    more.textContent = "…and " + (lines.length - 12) + " more";
+                    more.style.color = "#6b7280";
+                    list.appendChild(more);
+                }
+                box.appendChild(list);
+            }
+            box.addEventListener("click", hideStripToast);
+            (document.body || document.documentElement).appendChild(box);
+            _stripToastEl = box;
+            _stripToastTimer = setTimeout(hideStripToast, 8000);
+        } catch (e) {}
+    }
+
     if (typeof GM_registerMenuCommand === "function") {
         GM_registerMenuCommand("NullTrail Dashboard", function() {
             openDashboard();
@@ -5957,6 +6208,16 @@
             if (isWhitelisted(location.hostname)) removeWhitelist(location.hostname); 
             else addWhitelist(location.hostname);
             pushConfigToPage();
+        });
+        // v3.1.0 (#31) — per-domain quick controls.
+        GM_registerMenuCommand("What did NullTrail clean on this page?", function() {
+            showStripSummaryToast();
+        });
+        GM_registerMenuCommand("Pause 15 minutes (auto-resumes)", function() {
+            pauseUntil = Date.now() + 15 * 60 * 1000;
+            SV("pauseUntil", pauseUntil);
+            pushConfigToPage();
+            log("timed pause: 15 minutes");
         });
         GM_registerMenuCommand("Update rules now", function() {
             updateRules(true).then(function(status) {
@@ -6070,5 +6331,5 @@
     setTimeout(function() { updateRules(false); }, 3000);
     setInterval(function() { updateRules(false); }, 6 * 3600 * 1000);
 
-    log("NullTrail v3.0.2 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
+    log("NullTrail v3.1.0 initialised —", PROVIDERS.length, "providers,", ENGINES.length, "engines,", DOMAIN_REDIRECTS.length, "domain bypasses,", getEngine(location.hostname) ? getEngine(location.hostname).n : "generic");
 })();
